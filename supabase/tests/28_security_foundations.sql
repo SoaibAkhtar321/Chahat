@@ -53,6 +53,8 @@ INSERT INTO public.t_results SELECT 'on_block_cleanup: unrelated swipes B1-B3 pr
 
 -- 6. Test RLS block isolation (even if match row existed)
 SET ROLE service_role;
+-- ci-fix: reset b1/b2 match so the insert below is deterministic
+delete from public.matches where user_a in ('00000000-0000-0000-0000-0000000000b1','00000000-0000-0000-0000-0000000000b2') and user_b in ('00000000-0000-0000-0000-0000000000b1','00000000-0000-0000-0000-0000000000b2');
 INSERT INTO public.matches (id, user_a, user_b) VALUES
   ('bbbbbbbb-0000-0000-0000-000000000003', '00000000-0000-0000-0000-0000000000b1', '00000000-0000-0000-0000-0000000000b2');
 RESET ROLE;
