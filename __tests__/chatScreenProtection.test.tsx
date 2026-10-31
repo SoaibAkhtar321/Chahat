@@ -39,7 +39,7 @@ jest.mock("../mobile/src/context/MiloContext", () => ({ useMilo: () => mockMiloV
 jest.mock("../mobile/src/services/activeConversation", () => ({ setActiveConversation: jest.fn(), clearActiveConversation: jest.fn() }));
 jest.mock("../mobile/src/services/calls", () => ({ buildNewCallRoute: jest.fn() }));
 jest.mock("../mobile/src/services/callMedia", () => ({ isCallingAvailable: () => false }));
-jest.mock("../mobile/src/services/moderation", () => ({ blockUser: jest.fn(), reportUser: jest.fn(), unmatchUser: jest.fn() }));
+jest.mock("../mobile/src/services/moderation", () => ({ blockUser: jest.fn(), reportUser: jest.fn(), unmatchUser: jest.fn(), matchStillExists: jest.fn(async () => true) }));
 jest.mock("../mobile/src/services/voiceMedia", () => ({
   VOICE_LIMITS: { maxDurationMs: 60000 },
   getAudioRecorderAdapter: jest.fn(),

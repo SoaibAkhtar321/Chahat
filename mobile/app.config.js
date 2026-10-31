@@ -51,6 +51,35 @@ const withGooglePlayIapFlavor = (config) => {
   });
 };
 
+// Floating video-call window (picture-in-picture). Android only shrinks an activity into the small movable window
+// when the manifest says so, and the activity must handle the size changes itself instead of restarting (a restart
+// would drop the call). Expo's default MainActivity already handles most of them; smallestScreenSize is the one it lacks.
+const PIP_CONFIG_CHANGES = ["keyboard", "keyboardHidden", "orientation", "screenSize", "smallestScreenSize", "screenLayout", "uiMode"];
+
+function applyPictureInPictureToActivity(activity) {
+  activity.$["android:supportsPictureInPicture"] = "true";
+  const existing = String(activity.$["android:configChanges"] || "")
+    .split("|")
+    .filter(Boolean);
+  activity.$["android:configChanges"] = [...new Set([...existing, ...PIP_CONFIG_CHANGES])].join("|");
+  return activity;
+}
+
+const withPictureInPicture = (config) => {
+  const { withAndroidManifest } = require("@expo/config-plugins");
+
+  return withAndroidManifest(config, (config) => {
+    const application = config.modResults.manifest.application?.[0];
+    const activities = application?.activity ?? [];
+    const main = activities.find((item) => item.$["android:name"] === ".MainActivity");
+    if (!main) {
+      throw new Error("Could not find .MainActivity in the generated AndroidManifest.xml");
+    }
+    applyPictureInPictureToActivity(main);
+    return config;
+  });
+};
+
 // Agora's "full" SDK ships ~20 optional native feature libraries per CPU architecture (virtual background, face
 // detection, lip sync, AI noise suppression, screen capture, ...). Chahat only uses plain 1:1 voice/video calls, so
 // leaving them out cuts tens of MB from the APK. The SDK loads each of these only when its feature is enabled.
@@ -109,8 +138,9 @@ module.exports = (context) => {
     };
   }
 
-  return withSlimAgoraNativeLibs(withGooglePlayIapFlavor(config));
+  return withPictureInPicture(withSlimAgoraNativeLibs(withGooglePlayIapFlavor(config)));
 };
 
 module.exports.resolveGoogleServicesFile = resolveGoogleServicesFile;
 module.exports.UNUSED_AGORA_NATIVE_LIBS = UNUSED_AGORA_NATIVE_LIBS;
+module.exports.applyPictureInPictureToActivity = applyPictureInPictureToActivity;

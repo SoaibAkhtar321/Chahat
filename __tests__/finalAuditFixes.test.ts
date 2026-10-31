@@ -38,7 +38,7 @@ describe("call screen", () => {
   });
 
   it("timer label matches the plan and front/back camera is available", () => {
-    expect(screen).toMatch(/isFreePlan === false \? "Time left today" : "Free time left"/);
+    expect(screen).toMatch(/isFreePlan === false \? "Time left today" : onPaidMinute \? "Paid time left" : "Free time left"/);
     expect(screen).toMatch(/controller\?\.switchCamera\(\)/);
     expect(read("mobile/src/services/agoraCallMedia.tsx")).toMatch(/engine\.switchCamera\(\)/);
   });

@@ -8,6 +8,9 @@ const mockClearLast = jest.fn(async () => undefined);
 const mockStart = jest.fn(async () => undefined);
 const mockHandleCall = jest.fn(async () => undefined);
 const mockPush = jest.fn();
+const mockGetCalls = jest.fn();
+const mockDismissOngoing = jest.fn(async () => undefined);
+let mockPathname = "/(tabs)/discover";
 let mockUser: { id: string } | null = { id: "user-b" };
 let mockController: { start: jest.Mock; handleNotificationResponse: jest.Mock } | null;
 
@@ -22,6 +25,14 @@ jest.mock("expo-notifications", () => ({
 jest.mock("expo-router", () => ({
   useRouter: () => ({ push: mockPush }),
   useRootNavigationState: () => ({ key: "root" }),
+  usePathname: () => mockPathname,
+}));
+jest.mock("../mobile/src/services/calls", () => ({
+  ...jest.requireActual("../mobile/src/services/calls"),
+  getMyVideoCalls: (...a: unknown[]) => mockGetCalls(...a),
+}));
+jest.mock("../mobile/src/services/ongoingCallNotification", () => ({
+  dismissOngoingCallNotification: (...a: unknown[]) => mockDismissOngoing(...a),
 }));
 jest.mock("../mobile/src/context/AuthContext", () => ({ useAuth: () => ({ user: mockUser }) }));
 jest.mock("../mobile/src/context/IncomingCallContext", () => ({ useIncomingCallController: () => mockController }));
@@ -51,6 +62,8 @@ beforeEach(() => {
   mockListeners.length = 0;
   jest.clearAllMocks();
   mockUser = { id: "user-b" };
+  mockPathname = "/(tabs)/discover";
+  mockGetCalls.mockResolvedValue([{ id: CALL, match_id: MATCH, call_type: "video", status: "accepted" }]);
   mockGetLast.mockResolvedValue(null);
   mockController = { start: mockStart, handleNotificationResponse: mockHandleCall };
 });
@@ -104,5 +117,49 @@ describe("incoming-call notification responses", () => {
     await act(async () => { mockListeners[0]!(response("answer", "n10")); });
     await flush();
     expect(mockHandleCall).not.toHaveBeenCalled();
+  });
+});
+
+describe("ongoing-call notification (Tap to return to call)", () => {
+  const ongoing = (id = "chahat-ongoing-call") =>
+    response("expo.modules.notifications.actions.DEFAULT", id, { category: "ongoing_call", callId: CALL, matchId: MATCH });
+
+  it("opens the live call screen from another screen", async () => {
+    await mount();
+    await act(async () => { mockListeners[0]!(ongoing()); });
+    await flush();
+    expect(mockPush).toHaveBeenCalledWith({
+      pathname: "/call/[id]",
+      params: { id: MATCH, callId: CALL, type: "video" },
+    });
+    expect(mockHandleCall).not.toHaveBeenCalled(); // it is not an incoming call
+  });
+
+  it("does not open a second call screen when the call screen is already showing", async () => {
+    mockPathname = `/call/${MATCH}`;
+    await mount();
+    await act(async () => { mockListeners[0]!(ongoing()); });
+    await flush();
+    expect(mockPush).not.toHaveBeenCalled();
+  });
+
+  it("removes a stale notification instead of opening a finished call", async () => {
+    mockGetCalls.mockResolvedValue([{ id: CALL, match_id: MATCH, call_type: "video", status: "ended" }]);
+    await mount();
+    await act(async () => { mockListeners[0]!(ongoing()); });
+    await flush();
+    expect(mockPush).not.toHaveBeenCalled();
+    expect(mockDismissOngoing).toHaveBeenCalled();
+  });
+
+  it("still opens the call screen when the call cannot be checked (offline)", async () => {
+    mockGetCalls.mockRejectedValue(new Error("offline"));
+    await mount();
+    await act(async () => { mockListeners[0]!(ongoing()); });
+    await flush();
+    expect(mockPush).toHaveBeenCalledWith({
+      pathname: "/call/[id]",
+      params: { id: MATCH, callId: CALL, type: "video" },
+    });
   });
 });

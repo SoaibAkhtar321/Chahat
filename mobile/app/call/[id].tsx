@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { safeBack } from "../../src/utils/navigation";
-import { Alert, View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from "react-native";
+import { Alert, View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, useWindowDimensions } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { CallVideoStage, type CallSessionWithVideo } from "../../src/services/agoraCallMedia";
@@ -26,6 +26,18 @@ import {
   PHONE_BUSY_MESSAGE,
 } from "../../src/services/deviceCallState";
 import { callingUnavailableReason } from "../../src/services/registerCallProvider";
+import {
+  enterPictureInPicture,
+  isInPictureInPicture,
+  isPictureInPictureSupported,
+  PIP_MAX_WIDTH_DP,
+  setPictureInPictureArmed,
+  shouldMinimizeOnBack,
+} from "../../src/services/pictureInPicture";
+import {
+  dismissOngoingCallNotification,
+  showOngoingCallNotification,
+} from "../../src/services/ongoingCallNotification";
 import { formatCallDuration } from "../../src/utils/callEvents";
 import {
   createVideoCall,
@@ -364,24 +376,65 @@ export default function CallScreen() {
   };
 
   // Back (hardware button or gesture) must never silently drop a live call: the media session would leave
-  // while the server call stayed "accepted" and kept using up today's free time. Ask first, then end properly.
+  // while the server call stayed "accepted" and kept using up today's free time.
+  // * Connected video call: shrink into the floating window (like WhatsApp). The call keeps running; tap the
+  //   window or the "Tap to return to call" notification to come back.
+  // * Anything else (ringing, connecting, or the window is unavailable): ask first, then end properly.
+  const confirmLeaveCall = (): void => {
+    const ringingForMe = status === "pending" && isRecipient;
+    const title = ringingForMe ? "Decline call?" : status === "pending" ? "Cancel call?" : "End call?";
+    Alert.alert(title, undefined, [
+      { text: "Stay", style: "cancel" },
+      {
+        text: ringingForMe ? "Decline" : status === "pending" ? "Cancel call" : "End call",
+        style: "destructive",
+        onPress: () => void (ringingForMe ? handleDecline() : handleEnd()),
+      },
+    ]);
+  };
   const handleBackPress = (): boolean => {
-    if (status === "creating" || status === "pending" || status === "accepted") {
-      const ringingForMe = status === "pending" && isRecipient;
-      const title = ringingForMe ? "Decline call?" : status === "pending" ? "Cancel call?" : "End call?";
-      Alert.alert(title, undefined, [
-        { text: "Stay", style: "cancel" },
-        {
-          text: ringingForMe ? "Decline" : status === "pending" ? "Cancel call" : "End call",
-          style: "destructive",
-          onPress: () => void (ringingForMe ? handleDecline() : handleEnd()),
-        },
-      ]);
+    if (status !== "creating" && status !== "pending" && status !== "accepted") return false;
+    if (
+      shouldMinimizeOnBack({
+        status,
+        mediaPhase: media.phase,
+        callKind,
+        supported: isPictureInPictureSupported(),
+      })
+    ) {
+      void enterPictureInPicture().then((entered) => {
+        if (!entered) confirmLeaveCall();
+      });
       return true;
     }
-    return false;
+    confirmLeaveCall();
+    return true;
   };
   useHardwareBack(handleBackPress);
+
+  // Floating window. While a video call is connected: arm the automatic window (home button / swipe home),
+  // and keep a quiet "Tap to return to call" notification in the shade. Both are removed when the call ends.
+  const liveVideo = status === "accepted" && media.phase === "connected" && callKind === "video";
+  useEffect(() => {
+    if (!liveVideo) return undefined;
+    void setPictureInPictureArmed(true);
+    return () => {
+      void setPictureInPictureArmed(false);
+    };
+  }, [liveVideo]);
+  useEffect(() => {
+    if (!liveVideo || !callId || !id) return undefined;
+    void showOngoingCallNotification({ callId, matchId: id, partnerName: partner?.name });
+    return () => {
+      void dismissOngoingCallNotification();
+    };
+  }, [liveVideo, callId, id, partner?.name]);
+  // In the floating window the whole screen is only the video: no names, timers or buttons.
+  const { width: windowWidth } = useWindowDimensions();
+  const [inPip, setInPip] = useState(false);
+  useEffect(() => {
+    setInPip(windowWidth <= PIP_MAX_WIDTH_DP || isInPictureInPicture());
+  }, [windowWidth]);
 
   if (!partner) {
     return (
@@ -438,10 +491,14 @@ export default function CallScreen() {
     <SafeAreaView style={styles.container}>
       {showVideo ? (
         <View style={StyleSheet.absoluteFill}>
-          <CallVideoStage session={(controller?.getSession() as CallSessionWithVideo | null) ?? null} />
+          <CallVideoStage
+            session={(controller?.getSession() as CallSessionWithVideo | null) ?? null}
+            compact={inPip}
+          />
         </View>
       ) : null}
 
+      {inPip && showVideo ? null : (
       <View style={styles.topBlock} pointerEvents="none">
         {showVideo ? null : (
           <ProfilePhoto
@@ -478,7 +535,9 @@ export default function CallScreen() {
           <Text style={styles.error}>{media.error.message}</Text>
         ) : null}
       </View>
+      )}
 
+      {inPip && showVideo ? null : (
       <View style={styles.bottomBlock}>
         {premiumPrompt ? (
           <View style={styles.premiumCard}>
@@ -580,6 +639,7 @@ export default function CallScreen() {
           </TouchableOpacity>
         )}
       </View>
+      )}
     </SafeAreaView>
   );
 }

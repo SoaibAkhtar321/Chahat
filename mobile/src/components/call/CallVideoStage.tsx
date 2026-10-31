@@ -39,7 +39,14 @@ export function snapPosition(x: number, y: number, b: StageBounds): { x: number;
   };
 }
 
-export function CallVideoStage({ session }: { session: CallSessionWithVideo | null }): React.ReactElement | null {
+// `compact` is the floating picture-in-picture window: only the big video, no small self-view box.
+export function CallVideoStage({
+  session,
+  compact = false,
+}: {
+  session: CallSessionWithVideo | null;
+  compact?: boolean;
+}): React.ReactElement | null {
   const surface = session?.video;
   const insets = useSafeAreaInsets();
   const [, force] = useReducer((n: number) => n + 1, 0);
@@ -105,7 +112,7 @@ export function CallVideoStage({ session }: { session: CallSessionWithVideo | nu
   return (
     <View style={styles.stage} onLayout={onLayout} testID="call-video-stage">
       {large}
-      {size ? (
+      {size && !compact ? (
         <Animated.View
           {...responder.panHandlers}
           style={[styles.smallBox, { transform: pos.getTranslateTransform() }]}

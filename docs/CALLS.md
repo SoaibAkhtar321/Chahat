@@ -189,6 +189,22 @@ The ring stops and the notification is dismissed on cancel, decline, answer else
   `EXPO_PUBLIC_AGORA_APP_ID` are present). Otherwise this build neither rings nor answers: the controller refuses to accept
   a call it cannot join and says so. Decline still works. Connecting a real call has not been verified on a device.
 
+## Floating call window and "Tap to return to call" (Phase 5)
+
+* **Back during a connected video call** shrinks the app into Android's picture-in-picture window (the small movable
+  video box over other apps, like WhatsApp). The call keeps running; tap the window to return. Ringing, connecting, and
+  phones without picture-in-picture still show the old "End call?" dialog, so a call is never dropped silently.
+* **Home button / swipe home** during a connected video call enters the same window automatically (Android 12+ by
+  itself, Android 8-11 through `OnUserLeavesActivity` in the native module).
+* **Ongoing-call notification**: a quiet, sticky notification (channel `ongoing_call`) shows while the call is
+  connected. Tapping it returns to the call; if the call is already over it removes itself. Pure rules:
+  `mobile/src/services/ongoingCallPolicy.ts`.
+* Native side: `mobile/modules/call-state` (functions `isPictureInPictureSupported`, `isInPictureInPictureMode`,
+  `setPictureInPictureArmed`, `enterPictureInPicture`); manifest flags come from `withPictureInPicture` in
+  `mobile/app.config.js`. This needs a **new native build** (EAS), an OTA/JS-only update is not enough.
+* Not included: a foreground service. If the user closes the floating window with its X, Android may stop the
+  microphone/camera while the app is in the background; the notification lets them return.
+
 ## Agora provider (server)
 `_shared/agoraProvider.ts` implements `CallProvider`; `_shared/agoraTokenBuilder.ts` wraps `npm:agora-token@2.0.5`
 (RTC token, user-account form, publisher role, at most 120 s). Channel name is `call_<call id>`, account is the verified

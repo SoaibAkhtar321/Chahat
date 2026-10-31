@@ -218,7 +218,7 @@ describe("Phase B: Critical Security Foundations", () => {
       expect(mockDelete).not.toHaveBeenCalled();
     });
 
-    test("blockUser succeeds and cleans up match when block succeeds", async () => {
+    test("blockUser succeeds and keeps the chat, like WhatsApp (the match is not deleted)", async () => {
       mockInsert.mockResolvedValueOnce({ error: null });
 
       const result = await blockUser("target-user-456");
@@ -227,7 +227,7 @@ describe("Phase B: Critical Security Foundations", () => {
         blocker: "user-123",
         blocked: "target-user-456",
       });
-      expect(mockDelete).toHaveBeenCalled();
+      expect(mockDelete).not.toHaveBeenCalled();
     });
   });
 });
