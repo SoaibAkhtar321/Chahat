@@ -131,10 +131,10 @@ INSERT INTO public.t_results SELECT 'rr: a non-member sees no messages of anothe
 INSERT INTO public.t_results SELECT 'rr: the Plus chat stayed read-marked only by its real recipient',
   (SELECT count(*) FROM public.messages WHERE match_id = '73aaaaaa-0000-0000-0000-0000000000a2' AND read_at IS NOT NULL) = 1, '';
 
--- ===== E. Blocking removes the chat from list state =====
+-- ===== E. Blocking keeps the chat in list state (WhatsApp-style, 20260101007200) =====
 INSERT INTO public.blocks(blocker, blocked) VALUES ('73000000-0000-0000-0000-00000000000b', '73000000-0000-0000-0000-00000000000f');
 SET ROLE authenticated; SET request.jwt.claim.sub = '73000000-0000-0000-0000-00000000000f';
 INSERT INTO public.t73 SELECT 'blocked_list', coalesce(jsonb_agg(s.match_id), '[]') FROM public.get_chat_list_state() s;
 RESET ROLE;
-INSERT INTO public.t_results SELECT 'rr: a blocked pair''s chat returns no state',
-  v = '[]'::jsonb, v::text FROM public.t73 WHERE k = 'blocked_list';
+INSERT INTO public.t_results SELECT 'rr: a blocked pair''s chat stays in the list state',
+  v = '["73aaaaaa-0000-0000-0000-0000000000a5"]'::jsonb, v::text FROM public.t73 WHERE k = 'blocked_list';

@@ -36,8 +36,8 @@ fire() {
 }
 
 # ---- 1. 12 schedulers at once over 20 lapsed accepted calls + 1 abandoned pending call ----
-q "INSERT INTO video_calls(match_id, caller_id, recipient_id, call_type, status, expires_at, accepted_at, free_call_until, billing_exempt, billing_free_seconds)
-   SELECT '$M', '$A', '$B', 'audio', 'accepted', now() + interval '1 hour', now() - interval '90 seconds', now() - interval '30 seconds', false, 60
+q "INSERT INTO video_calls(match_id, caller_id, recipient_id, call_type, status, expires_at, accepted_at, connected_at, free_call_until, billing_exempt, billing_free_seconds)
+   SELECT '$M', '$A', '$B', 'audio', 'accepted', now() + interval '1 hour', now() - interval '90 seconds', now() - interval '90 seconds', now() - interval '30 seconds', false, 60
    FROM generate_series(1, 20)" >/dev/null
 q "INSERT INTO video_calls(match_id, caller_id, recipient_id, call_type, expires_at)
    VALUES ('$M', '$A', '$B', 'video', now() - interval '1 second')" >/dev/null

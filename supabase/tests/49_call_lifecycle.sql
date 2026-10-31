@@ -103,15 +103,15 @@ INSERT INTO public.t_results SELECT 'expiry: a metered call past its authorised 
   FROM public.video_calls WHERE id = (SELECT id FROM public.lc_calls WHERE label='a1');
 
 -- unmetered (exempt) calls: capped at the maximum duration, not before
-INSERT INTO public.video_calls(match_id, caller_id, recipient_id, call_type, status, expires_at, accepted_at, billing_exempt, free_call_until)
+INSERT INTO public.video_calls(match_id, caller_id, recipient_id, call_type, status, expires_at, accepted_at, connected_at, billing_exempt, free_call_until)
 VALUES ('dddddddd-0000-0000-0000-0000000000e2', '91000000-0000-0000-0000-000000000001', '91000000-0000-0000-0000-000000000003',
-        'video', 'accepted', now() + interval '1 hour', now() - interval '1 hour', true, NULL);
+        'video', 'accepted', now() + interval '1 hour', now() - interval '1 hour', now() - interval '1 hour', true, NULL);
 SET ROLE service_role; SET request.jwt.claim.role = 'service_role';
 SELECT public.expire_video_calls();
 RESET ROLE; RESET request.jwt.claim.role;
 INSERT INTO public.t_results SELECT 'expiry: unmetered call inside the maximum duration keeps running',
   count(*) = 1, count(*)::text FROM public.video_calls WHERE match_id = 'dddddddd-0000-0000-0000-0000000000e2' AND status = 'accepted';
-UPDATE public.video_calls SET accepted_at = now() - interval '4 hours' WHERE match_id = 'dddddddd-0000-0000-0000-0000000000e2' AND status = 'accepted';
+UPDATE public.video_calls SET accepted_at = now() - interval '4 hours', connected_at = now() - interval '4 hours' WHERE match_id = 'dddddddd-0000-0000-0000-0000000000e2' AND status = 'accepted';
 SET ROLE service_role; SET request.jwt.claim.role = 'service_role';
 SELECT public.expire_video_calls();
 RESET ROLE; RESET request.jwt.claim.role;

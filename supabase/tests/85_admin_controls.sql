@@ -44,7 +44,7 @@ CALL public.expect_fail('ads: members cannot read the ads table directly', $q$SE
 CALL public.expect_fail('ads: members cannot write ad events directly',
   $q$INSERT INTO public.ad_events(ad_id, user_id, kind) VALUES ('85ad0000-0000-0000-0000-000000000001', '85000000-0000-0000-0000-00000000000a', 'click')$q$);
 CALL public.expect_fail('ads: members cannot read purchase attempts', $q$SELECT * FROM public.purchase_attempts$q$);
-CALL public.expect_fail('reports: members cannot run business metrics', $q$SELECT * FROM public.admin_daily_metrics(current_date, current_date)$q$);
+CALL public.expect_fail('reports: members cannot run business metrics', $q$SELECT * FROM public.admin_daily_metrics((now() AT TIME ZONE 'Asia/Kolkata')::date, (now() AT TIME ZONE 'Asia/Kolkata')::date)$q$);
 CALL public.expect_fail('broadcast: members cannot list push targets', $q$SELECT * FROM public.announcement_targets('{}'::jsonb)$q$);
 SET request.jwt.claim.sub = '85000000-0000-0000-0000-00000000000b';
 INSERT INTO public.t_json SELECT 'ads_woman', coalesce(jsonb_agg(a.title), '[]') FROM public.get_discover_ads(5) a;
@@ -74,7 +74,7 @@ INSERT INTO public.t_json SELECT 'ann_all', coalesce(jsonb_agg(t.push_token), '[
 WHERE t.push_token LIKE 'ExponentPushToken[ac-%';
 INSERT INTO public.t_json SELECT 'ann_women', coalesce(jsonb_agg(t.push_token), '[]') FROM public.announcement_targets('{"gender":"woman"}'::jsonb, NULL, 1000) t
 WHERE t.push_token LIKE 'ExponentPushToken[ac-%';
-INSERT INTO public.t_json SELECT 'metrics', to_jsonb(m) FROM public.admin_daily_metrics(current_date, current_date) m;
+INSERT INTO public.t_json SELECT 'metrics', to_jsonb(m) FROM public.admin_daily_metrics((now() AT TIME ZONE 'Asia/Kolkata')::date, (now() AT TIME ZONE 'Asia/Kolkata')::date) m;
 RESET ROLE;
 INSERT INTO public.t_results SELECT 'broadcast: members who turned off offers are never targeted',
   (SELECT result FROM public.t_json WHERE label = 'ann_all') = '["ExponentPushToken[ac-a-123456789]"]'::jsonb

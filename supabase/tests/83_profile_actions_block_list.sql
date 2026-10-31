@@ -77,13 +77,13 @@ INSERT INTO public.t_results SELECT 'profile actions: blocked pair -> unavailabl
   r1 = '{"available": false}'::jsonb AND r2 = '{"available": false}'::jsonb, r1::text || r2::text
 FROM (SELECT public.t83_actions('83000000-0000-0000-0000-00000000000a', '83000000-0000-0000-0000-00000000000e') r1,
              public.t83_actions('83000000-0000-0000-0000-00000000000e', '83000000-0000-0000-0000-00000000000a') r2) x;
-INSERT INTO public.t_results SELECT 'block: the match and its chat are removed (unchanged safety rule)',
-  NOT EXISTS (SELECT 1 FROM public.matches WHERE id = '83aaaaaa-0000-0000-0000-0000000000a1'), 'match gone';
+INSERT INTO public.t_results SELECT 'block: the match and its chat are kept (WhatsApp-style block)',
+  EXISTS (SELECT 1 FROM public.matches WHERE id = '83aaaaaa-0000-0000-0000-0000000000a1'), 'match kept';
 
 -- Unblock -> available again and likeable.
 SET ROLE authenticated; SET request.jwt.claim.sub = '83000000-0000-0000-0000-00000000000a';
 DELETE FROM public.blocks WHERE blocker = '83000000-0000-0000-0000-00000000000a' AND blocked = '83000000-0000-0000-0000-00000000000e';
 RESET ROLE;
-INSERT INTO public.t_results SELECT 'unblock: profile is available and can be liked again',
-  (r->>'available')::boolean AND (r->>'can_like')::boolean, r::text
+INSERT INTO public.t_results SELECT 'unblock: profile is available again (still matched, so Message not Like)',
+  (r->>'available')::boolean AND r->>'reason' = 'matched' AND NOT (r->>'can_like')::boolean AND r->>'match_id' = '83aaaaaa-0000-0000-0000-0000000000a1', r::text
 FROM (SELECT public.t83_actions('83000000-0000-0000-0000-00000000000a', '83000000-0000-0000-0000-00000000000e') r) x;

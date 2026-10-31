@@ -45,25 +45,23 @@ INSERT INTO public.blocks (blocker, blocked) VALUES ('00000000-0000-0000-0000-00
 RESET ROLE;
 
 -- 5. Verify trigger cleanup (on_block_cleanup)
-INSERT INTO public.t_results SELECT 'on_block_cleanup: match B1-B2 deleted from DB', count(*)=0, count(*)::text FROM public.matches WHERE id='bbbbbbbb-0000-0000-0000-000000000001';
-INSERT INTO public.t_results SELECT 'on_block_cleanup: messages B1-B2 cascaded', count(*)=0, count(*)::text FROM public.messages WHERE match_id='bbbbbbbb-0000-0000-0000-000000000001';
-INSERT INTO public.t_results SELECT 'on_block_cleanup: swipes B1-B2 deleted', count(*)=0, count(*)::text FROM public.swipes WHERE (from_id='00000000-0000-0000-0000-0000000000b1' AND to_id='00000000-0000-0000-0000-0000000000b2') OR (from_id='00000000-0000-0000-0000-0000000000b2' AND to_id='00000000-0000-0000-0000-0000000000b1');
+INSERT INTO public.t_results SELECT 'on_block_cleanup: match B1-B2 kept (WhatsApp-style block)', count(*)=1, count(*)::text FROM public.matches WHERE id='bbbbbbbb-0000-0000-0000-000000000001';
+INSERT INTO public.t_results SELECT 'on_block_cleanup: messages B1-B2 kept (WhatsApp-style block)', count(*)=1, count(*)::text FROM public.messages WHERE match_id='bbbbbbbb-0000-0000-0000-000000000001';
+INSERT INTO public.t_results SELECT 'on_block_cleanup: swipes B1-B2 kept (WhatsApp-style block)', count(*)=2, count(*)::text FROM public.swipes WHERE (from_id='00000000-0000-0000-0000-0000000000b1' AND to_id='00000000-0000-0000-0000-0000000000b2') OR (from_id='00000000-0000-0000-0000-0000000000b2' AND to_id='00000000-0000-0000-0000-0000000000b1');
 INSERT INTO public.t_results SELECT 'on_block_cleanup: unrelated match B1-B3 preserved', count(*)=1, count(*)::text FROM public.matches WHERE id='bbbbbbbb-0000-0000-0000-000000000002';
 INSERT INTO public.t_results SELECT 'on_block_cleanup: unrelated swipes B1-B3 preserved', count(*)=2, count(*)::text FROM public.swipes WHERE (from_id='00000000-0000-0000-0000-0000000000b1' AND to_id='00000000-0000-0000-0000-0000000000b3') OR (from_id='00000000-0000-0000-0000-0000000000b3' AND to_id='00000000-0000-0000-0000-0000000000b1');
 
--- 6. Test RLS block isolation (even if match row existed)
-SET ROLE service_role;
--- ci-fix: reset b1/b2 match so the insert below is deterministic
-delete from public.matches where user_a in ('00000000-0000-0000-0000-0000000000b1','00000000-0000-0000-0000-0000000000b2') and user_b in ('00000000-0000-0000-0000-0000000000b1','00000000-0000-0000-0000-0000000000b2');
-INSERT INTO public.matches (id, user_a, user_b) VALUES
-  ('bbbbbbbb-0000-0000-0000-000000000003', '00000000-0000-0000-0000-0000000000b1', '00000000-0000-0000-0000-0000000000b2');
-RESET ROLE;
-
+-- 6. WhatsApp-style block (20260101007200): both people stay members of the chat; the blocked person sees the name only
 SET ROLE authenticated; SET request.jwt.claim.sub='00000000-0000-0000-0000-0000000000b2';
-INSERT INTO public.t_results SELECT 'blocked: B2 cannot read match via RLS', count(*)=0, count(*)::text FROM public.matches WHERE id='bbbbbbbb-0000-0000-0000-000000000003';
-INSERT INTO public.t_results SELECT 'blocked: is_match_member returns false for blocked pair', NOT public.is_match_member('bbbbbbbb-0000-0000-0000-000000000003'::uuid), 'ok';
-INSERT INTO public.t_results SELECT 'blocked: chat_folder_member returns false for blocked pair', NOT public.chat_folder_member('bbbbbbbb-0000-0000-0000-000000000003'), 'ok';
-INSERT INTO public.t_results SELECT 'blocked: get_public_profile returns 0 rows for blocker', count(*)=0, count(*)::text FROM public.get_public_profile('00000000-0000-0000-0000-0000000000b1');
+INSERT INTO public.t_results SELECT 'blocked: B2 (blocked) still reads the match', count(*)=1, count(*)::text FROM public.matches WHERE id='bbbbbbbb-0000-0000-0000-000000000001';
+INSERT INTO public.t_results SELECT 'blocked: is_match_member stays true for the blocked person', public.is_match_member('bbbbbbbb-0000-0000-0000-000000000001'::uuid), 'ok';
+INSERT INTO public.t_results SELECT 'blocked: chat_folder_member stays true for the blocked person', public.chat_folder_member('bbbbbbbb-0000-0000-0000-000000000001'), 'ok';
+INSERT INTO public.t_results SELECT 'blocked: B2 sees only the name of the blocker (no age, city, bio, photos)',
+  count(*)=1 AND bool_and(age = 0 AND city IS NULL AND bio IS NULL AND photos = '[]'::jsonb), count(*)::text
+FROM public.get_public_profile('00000000-0000-0000-0000-0000000000b1');
+RESET ROLE;
+SET ROLE authenticated; SET request.jwt.claim.sub='00000000-0000-0000-0000-0000000000b1';
+INSERT INTO public.t_results SELECT 'blocked: the blocker still sees the blocked person''s profile', count(*)=1, count(*)::text FROM public.get_public_profile('00000000-0000-0000-0000-0000000000b2');
 RESET ROLE;
 
 -- 7. Test Verification Guard (account_state_guard)
