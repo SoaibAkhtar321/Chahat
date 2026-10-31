@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { safeBack } from "../../src/utils/navigation";
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from "react-native";
+import { Alert, View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { CallVideoStage, type CallSessionWithVideo } from "../../src/services/agoraCallMedia";
@@ -11,6 +11,7 @@ import { ProfilePhoto } from "../../src/components/profile/ProfilePhoto";
 import { useMilo } from "../../src/context/MiloContext";
 import { useAuth } from "../../src/context/AuthContext";
 import { useCallController } from "../../src/hooks/useCallController";
+import { useHardwareBack } from "../../src/hooks/useHardwareBack";
 import {
   friendlyCallError,
   isCallingAvailable,
@@ -59,6 +60,9 @@ export default function CallScreen() {
   // Premium prompt, shown when today's free video-call time is used up (replaces the old "not enough coins").
   const [premiumPrompt, setPremiumPrompt] = useState<string | null>(null);
   const [isFreePlan, setIsFreePlan] = useState(true);
+  // Daily free limit for this plan, and whether this call runs on a paid (coin) minute instead of free time.
+  const [freeLimitSeconds, setFreeLimitSeconds] = useState<number | null>(null);
+  const [onPaidMinute, setOnPaidMinute] = useState(false);
   // Server-covered time ends at this wall-clock moment; the screen counts down to it and hangs up itself.
   const [coveredUntil, setCoveredUntil] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -235,7 +239,10 @@ export default function CallScreen() {
   // Free plan check, used to pick the right wording when time runs out.
   useEffect(() => {
     void getUserVideoCallAllowance()
-      .then((allowance) => setIsFreePlan(allowance.isFree))
+      .then((allowance) => {
+        setIsFreePlan(allowance.isFree);
+        if (allowance.valid) setFreeLimitSeconds(allowance.dailyLimitSeconds);
+      })
       .catch(() => undefined);
   }, []);
 
@@ -252,6 +259,13 @@ export default function CallScreen() {
 
   // The user is free to stay on the call for the whole covered time. When it is really over, end cleanly.
   const secondsLeft = coveredUntil === null ? null : Math.max(0, Math.ceil((coveredUntil - now) / 1000));
+  // A free-plan window longer than the daily free limit can only be a paid (coin) minute, so say so
+  // instead of calling it "free". Latched: it stays paid even as the countdown drops below the limit.
+  useEffect(() => {
+    if (isFreePlan && freeLimitSeconds !== null && secondsLeft !== null && secondsLeft > freeLimitSeconds) {
+      setOnPaidMinute(true);
+    }
+  }, [isFreePlan, freeLimitSeconds, secondsLeft]);
   const timeUpHandled = useRef(false);
   useEffect(() => {
     if (secondsLeft !== 0 || status !== "accepted" || media.phase !== "connected" || timeUpHandled.current) return;
@@ -268,11 +282,38 @@ export default function CallScreen() {
     })();
   }, [secondsLeft, status, media.phase, controller, callId, isFreePlan, user?.id, recipientId]);
 
+  // Latest call facts for the unmount cleanup below (an effect cleanup would otherwise see stale values).
+  const liveCall = useRef<{ callId?: string; status: CallStatus | "creating"; isRecipient: boolean }>({
+    callId,
+    status,
+    isRecipient: false,
+  });
+  liveCall.current = {
+    callId,
+    status,
+    isRecipient: Boolean(user?.id && recipientId && user.id === recipientId),
+  };
+  // If this screen closes while the call is still live (swipe-away, route change, anything but the End
+  // button), close it on the server too. Otherwise the media session leaves but the call stays "accepted"
+  // and keeps using up today's free time. A ringing call that is ringing FOR this user is left alone.
+  useEffect(() => {
+    return () => {
+      const { callId: liveId, status: liveStatus, isRecipient: liveRecipient } = liveCall.current;
+      if (!liveId) return;
+      if (liveStatus === "accepted") {
+        void transitionVideoCall(liveId, "end").catch(() => undefined);
+      } else if (liveStatus === "pending" && !liveRecipient) {
+        void transitionVideoCall(liveId, "cancel").catch(() => undefined);
+      }
+    };
+  }, []);
+
   const handleEnd = async () => {
     await controller?.hangUp();
     if (callId && (status === "pending" || status === "accepted")) {
       try {
         const next = await transitionVideoCall(callId, status === "pending" ? "cancel" : "end");
+        liveCall.current.status = next; // so the unmount cleanup does not send a second "end"
         setStatus(next);
       } catch (cause) {
         setError(friendlyCallError(cause, "Could not end the call."));
@@ -321,6 +362,26 @@ export default function CallScreen() {
       setResponding(false);
     }
   };
+
+  // Back (hardware button or gesture) must never silently drop a live call: the media session would leave
+  // while the server call stayed "accepted" and kept using up today's free time. Ask first, then end properly.
+  const handleBackPress = (): boolean => {
+    if (status === "creating" || status === "pending" || status === "accepted") {
+      const ringingForMe = status === "pending" && isRecipient;
+      const title = ringingForMe ? "Decline call?" : status === "pending" ? "Cancel call?" : "End call?";
+      Alert.alert(title, undefined, [
+        { text: "Stay", style: "cancel" },
+        {
+          text: ringingForMe ? "Decline" : status === "pending" ? "Cancel call" : "End call",
+          style: "destructive",
+          onPress: () => void (ringingForMe ? handleDecline() : handleEnd()),
+        },
+      ]);
+      return true;
+    }
+    return false;
+  };
+  useHardwareBack(handleBackPress);
 
   if (!partner) {
     return (
@@ -403,7 +464,7 @@ export default function CallScreen() {
         ) : null}
         {connected && secondsLeft !== null ? (
           <Text style={[styles.timer, secondsLeft <= 5 && { color: Colors.destructive }]}>
-            {isFreePlan === false ? "Time left today" : "Free time left"}: {formatCallDuration(secondsLeft)}
+            {isFreePlan === false ? "Time left today" : onPaidMinute ? "Paid time left" : "Free time left"}: {formatCallDuration(secondsLeft)}
           </Text>
         ) : null}
         {callingAvailable ? null : (

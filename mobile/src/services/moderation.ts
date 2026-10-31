@@ -5,7 +5,8 @@ export async function blockUser(targetId: string): Promise<boolean> {
     const uid = (await supabase.auth.getUser()).data.user?.id;
     if (!uid) return false;
 
-    // 1. Insert block (triggers automatic server-side on_block_cleanup of matches/swipes)
+    // Block like WhatsApp: only the block row is created. The match, the chat and its messages stay for both
+    // people (the server hides the blocked person's new messages from the blocker; see 20260101007200).
     const { error: blockErr } = await supabase.from("blocks").insert({
       blocker: uid,
       blocked: targetId,
@@ -14,14 +15,6 @@ export async function blockUser(targetId: string): Promise<boolean> {
       console.warn("blockUser: block insertion failed", blockErr.message);
       return false;
     }
-
-    // 2. Client-side match cleanup (defense-in-depth)
-    await supabase
-      .from("matches")
-      .delete()
-      .or(
-        `and(user_a.eq.${uid},user_b.eq.${targetId}),and(user_a.eq.${targetId},user_b.eq.${uid})`,
-      );
 
     return true;
   } catch {
@@ -93,9 +86,24 @@ export async function reportUser(
 
 export async function unmatchUser(matchId: string): Promise<boolean> {
   try {
-    const { error } = await supabase.from("matches").delete().eq("id", matchId);
-    return !error;
+    // Server-side: closes any call on the match first, then removes the match (see 20260101007300).
+    const { data, error } = await supabase.rpc("unmatch_user", { _match_id: matchId });
+    return !error && data?.success === true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Whether this match still exists for me: true / false, or null when it could not be checked (offline etc.).
+ * Used to leave a chat the other person has unmatched, without ever guessing from a failed network call.
+ */
+export async function matchStillExists(matchId: string): Promise<boolean | null> {
+  try {
+    const { data, error } = await supabase.from("matches").select("id").eq("id", matchId).maybeSingle();
+    if (error) return null;
+    return data !== null;
+  } catch {
+    return null;
   }
 }

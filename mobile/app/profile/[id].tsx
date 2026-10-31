@@ -443,7 +443,7 @@ export default function ProfileDetailScreen() {
       <Dialog
         visible={dialogAction === "block"}
         title={`Block ${targetProfile.name}?`}
-        body="They won't be able to see your profile, message or call you. You can unblock them later in Settings → Blocked accounts."
+        body="They won't be able to call you or see your profile photo, and you won't get their new messages. The chat stays in your list. You can unblock them anytime in Settings → Blocked accounts."
         confirmText="Block"
         danger
         onConfirm={async () => {

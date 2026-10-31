@@ -81,7 +81,14 @@ import {
   getAudioRecorderAdapter,
   VOICE_LIMITS,
 } from "../../src/services/voiceMedia";
-import { blockUser, reportUser, unmatchUser } from "../../src/services/moderation";
+import {
+  blockUser,
+  fetchBlockedUsers,
+  matchStillExists,
+  reportUser,
+  unblockUser,
+  unmatchUser,
+} from "../../src/services/moderation";
 import { supabase } from "../../src/services/supabase";
 import { joinChatPresence, type ChatPresence } from "../../src/services/chatPresence";
 import { presenceLabel } from "../../src/utils/typingState";
@@ -186,6 +193,38 @@ export default function ChatDetailScreen() {
     photos: [],
     interests: [],
     intent: "",
+  };
+
+  // WhatsApp-style block: the chat stays, but I cannot message or call someone I blocked until I unblock them.
+  const [iBlocked, setIBlocked] = useState(false);
+  const refreshBlockState = useCallback(async () => {
+    if (!otherUser.id || otherUser.id === "unknown") return;
+    const blocked = await fetchBlockedUsers();
+    setIBlocked(blocked.some((b) => b.id === otherUser.id));
+  }, [otherUser.id]);
+  // If the other person unmatched while I was away, leave this chat instead of showing a dead conversation.
+  const leaveIfUnmatched = useCallback(async () => {
+    if (!matchId) return false;
+    if ((await matchStillExists(matchId)) !== false) return false;
+    Alert.alert("Conversation ended", "This conversation is no longer available.");
+    refreshMatches();
+    safeBack(router);
+    return true;
+  }, [matchId, refreshMatches, router]);
+  useFocusEffect(
+    useCallback(() => {
+      void refreshBlockState();
+      void leaveIfUnmatched();
+    }, [refreshBlockState, leaveIfUnmatched]),
+  );
+  const handleUnblock = async () => {
+    const ok = await unblockUser(otherUser.id);
+    if (!ok) {
+      Alert.alert("Couldn't unblock", "Please check your connection and try again.");
+      return;
+    }
+    setIBlocked(false);
+    refreshMatches();
   };
 
   // While this chat is focused, a foreground push for the same conversation is redundant.
@@ -305,7 +344,7 @@ export default function ChatDetailScreen() {
   useEffect(() => {
     setPartnerOnline(false);
     setPartnerTyping(false);
-    if (!matchId || !user) return;
+    if (!matchId || !user || iBlocked) return;
     const presence = joinChatPresence(matchId, user.id, {
       onPartnerOnline: setPartnerOnline,
       onPartnerTyping: setPartnerTyping,
@@ -315,7 +354,7 @@ export default function ChatDetailScreen() {
       presence.leave();
       if (presenceRef.current === presence) presenceRef.current = null;
     };
-  }, [matchId, user]);
+  }, [matchId, user, iBlocked]);
 
   const handleInputChange = (text: string) => {
     setInputText(text);
@@ -473,6 +512,13 @@ export default function ChatDetailScreen() {
         "Message unavailable",
         "The message you were replying to is no longer available. Your message was not sent.",
       );
+    } else if (/row-level security|violates/i.test(res.error ?? "")) {
+      // The only way to hit this now is having blocked them since the chat opened: never show database text.
+      setInputText(text);
+      setSelectedImages(images);
+      if (await leaveIfUnmatched()) return;
+      await refreshBlockState();
+      Alert.alert("Message not sent", `Unblock ${otherUser.name} to send messages.`);
     } else {
       Alert.alert("Error", res.error || "Could not send message");
     }
@@ -636,12 +682,9 @@ export default function ChatDetailScreen() {
         Alert.alert("Couldn't block", "Please check your connection and try again.");
         return;
       }
-      Alert.alert(
-        "Blocked",
-        `You blocked ${otherUser.name}. You can unblock them anytime in Settings → Blocked accounts.`,
-      );
+      setIBlocked(true);
+      setActionDialog(null);
       refreshMatches();
-      safeBack(router);
     } else if (actionDialog === "unmatch") {
       const ok = await unmatchUser(matchId);
       if (!ok) {
@@ -701,7 +744,11 @@ export default function ChatDetailScreen() {
           <TouchableOpacity
             style={styles.actionIcon}
             accessibilityLabel="Start video call"
-            onPress={() => void startVideoCallIfAllowed(router, matchId)}
+            onPress={() =>
+              iBlocked
+                ? Alert.alert("Can't call", `Unblock ${otherUser.name} to start a video call.`)
+                : void startVideoCallIfAllowed(router, matchId)
+            }
           >
             <Video size={20} color={Colors.primary} />
           </TouchableOpacity>
@@ -997,6 +1044,19 @@ export default function ChatDetailScreen() {
               <Send size={18} color={Colors.primaryForeground} />
             </TouchableOpacity>
           </View>
+        ) : iBlocked ? (
+          <TouchableOpacity
+            style={styles.blockedBar}
+            onPress={() => void handleUnblock()}
+            accessibilityRole="button"
+            accessibilityLabel={`Unblock ${otherUser.name}`}
+            testID="chat-unblock"
+            activeOpacity={0.8}
+          >
+            <Text style={styles.blockedBarText}>
+              You blocked {otherUser.name}. Tap to unblock.
+            </Text>
+          </TouchableOpacity>
         ) : (
         <View style={styles.inputBar}>
           <TouchableOpacity
@@ -1162,9 +1222,9 @@ export default function ChatDetailScreen() {
         }
         body={
           actionDialog === "block"
-            ? "They won't be able to see your profile, message or call you, and this chat will be deleted for both of you. You can unblock them later in Settings → Blocked accounts."
+            ? "They won't be able to call you or see your profile photo, and you won't get their new messages. The chat stays in your list. You can unblock them anytime from this chat or Settings → Blocked accounts."
             : actionDialog === "unmatch"
-              ? "This chat will be deleted for both of you and you won't see each other in Discover again. They won't be notified. To also stop them from finding your profile, use Block instead."
+              ? "This chat and any call in progress will end for both of you, and you won't see each other in Discover again. They won't be notified. To also stop them from calling you or seeing your profile photo, use Block instead."
               : "Please report inappropriate content, harassment, fake profiles, or safety issues."
         }
         confirmText={
@@ -1183,6 +1243,15 @@ export default function ChatDetailScreen() {
 }
 
 const createStyles = (Colors: ThemeColors) => StyleSheet.create({
+  blockedBar: {
+    paddingVertical: 16,
+    paddingHorizontal: 20,
+    alignItems: "center",
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: Colors.border,
+    backgroundColor: Colors.card,
+  },
+  blockedBarText: { color: Colors.mutedForeground, fontSize: 14, textAlign: "center" },
   container: {
     flex: 1,
     backgroundColor: Colors.background,
