@@ -537,6 +537,54 @@ export async function setMessageReaction(messageId: string, emoji: string | null
 }
 
 /** Marks the other person's messages (text, voice, photo) as read. true only when the server confirmed it. Never throws. */
+/**
+ * Cheap check used on screen focus / app foreground: only the ids of my matches (one small query). Returns null when
+ * the query failed, so a failure is never mistaken for "no matches".
+ */
+export async function fetchMatchIds(currentUserId: string): Promise<string[] | null> {
+  if (!isSupabaseConfigured()) return null;
+  try {
+    const { data, error } = await supabase
+      .from("matches")
+      .select("id")
+      .or(`user_a.eq.${currentUserId},user_b.eq.${currentUserId}`);
+    if (error || !Array.isArray(data)) return null;
+    return data.map((r: any) => String(r.id));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Live "someone matched with me". The row itself is never trusted: any event only tells the app to re-read my matches
+ * from the server, which already hides blocked and removed matches. `onResync` runs after a reconnect so events missed
+ * while offline are caught up. Realtime filters take one column, so there is one listener per side of the pair.
+ */
+export function subscribeToMyMatches(currentUserId: string, onChange: () => void, onResync: () => void): () => void {
+  if (!isSupabaseConfigured()) return () => {};
+  let subscribedBefore = false;
+  const channel = supabase
+    .channel(`my_matches_${currentUserId}`)
+    .on(
+      "postgres_changes",
+      { event: "INSERT", schema: "public", table: "matches", filter: `user_a=eq.${currentUserId}` },
+      () => onChange(),
+    )
+    .on(
+      "postgres_changes",
+      { event: "INSERT", schema: "public", table: "matches", filter: `user_b=eq.${currentUserId}` },
+      () => onChange(),
+    )
+    .subscribe((status) => {
+      if (status !== "SUBSCRIBED") return;
+      if (subscribedBefore) onResync();
+      subscribedBefore = true;
+    });
+  return () => {
+    void supabase.removeChannel(channel);
+  };
+}
+
 export async function markChatRead(matchId: string, _currentUserId?: string): Promise<boolean> {
   try {
     if (!matchId || !isValidUUID(matchId)) return false;

@@ -20,7 +20,11 @@ jest.mock("../mobile/src/services/subscription", () => ({
   getDailyLikeQuota: jest.fn(async () => ({ remaining: 0, limit: 10 })),
   getUserSubscription: jest.fn(async () => null),
 }));
-jest.mock("../mobile/src/services/chat", () => ({ fetchUserMatches: (...a: unknown[]) => mockFetchMatches(...a) }));
+jest.mock("../mobile/src/services/chat", () => ({
+  fetchUserMatches: (...a: unknown[]) => mockFetchMatches(...a),
+  fetchMatchIds: jest.fn(async () => null),
+  subscribeToMyMatches: jest.fn(() => () => {}),
+}));
 
 import { MiloProvider, useMilo } from "../mobile/src/context/MiloContext";
 import { clearActiveConversation, setActiveConversation } from "../mobile/src/services/activeConversation";

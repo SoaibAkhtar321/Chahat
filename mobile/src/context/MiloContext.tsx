@@ -10,7 +10,8 @@ import {
   undoLastPass,
   type DiscoveryCursor,
 } from "../services/discovery";
-import { fetchUserMatches } from "../services/chat";
+import { fetchUserMatches, fetchMatchIds, subscribeToMyMatches } from "../services/chat";
+import { isOwnRecentSwipe, shouldRecheckDeck, unseenIds } from "../services/liveSyncPolicy";
 import {
   getDailyLikeQuota,
   getUserSubscription,
@@ -42,6 +43,15 @@ interface MiloContextType {
   refreshMatches: () => Promise<void>;
   /** The messages of this chat have been read: show 0 unread at once (list and tab), then re-sync with the server. */
   clearUnread: (matchId: string) => void;
+  /** Silent look for new profiles while the deck is empty (back-off). `force` = a person's own tap. */
+  recheckDeck: (force?: boolean) => Promise<void>;
+  /** Cheap check for new or removed matches (ids only); loads the full list only when something changed. */
+  syncMatches: () => Promise<void>;
+  /** A match made by the OTHER person's like: open the "It's a match" popup once, then dismiss. */
+  matchPopup: { matchId: string; otherUserId: string } | null;
+  dismissMatchPopup: () => void;
+  /** Profile just matched through my own swipe: the match screen needs it after the card left the deck. */
+  lastMatchedProfile: Profile | null;
 }
 
 const MiloContext = createContext<MiloContextType>({
@@ -67,6 +77,11 @@ const MiloContext = createContext<MiloContextType>({
   loadMoreDeck: async () => {},
   refreshMatches: async () => {},
   clearUnread: () => {},
+  recheckDeck: async () => {},
+  syncMatches: async () => {},
+  matchPopup: null,
+  dismissMatchPopup: () => {},
+  lastMatchedProfile: null,
 });
 
 export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -87,6 +102,21 @@ export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const matchesRequest = useRef(0);
   const subscriptionRequest = useRef(0);
   const currentUserId = user?.id ?? null;
+  const [matchPopup, setMatchPopup] = useState<{ matchId: string; otherUserId: string } | null>(null);
+  const [lastMatchedProfile, setLastMatchedProfile] = useState<Profile | null>(null);
+  // Live-sync bookkeeping (refs: no re-render needed).
+  const deckRef = useRef<Profile[]>(deck);
+  deckRef.current = deck;
+  const matchesRef = useRef<MatchItem[]>(matches);
+  matchesRef.current = matches;
+  const loadingDeckRef = useRef(false);
+  loadingDeckRef.current = loadingDeck;
+  const recheckBusy = useRef(false);
+  const emptyChecks = useRef(0);
+  const lastCheckAt = useRef(0);
+  const seenMatchIds = useRef<Set<string>>(new Set());
+  const matchBaselineReady = useRef(false);
+  const ownSwipeAt = useRef<Map<string, number>>(new Map());
 
   useEffect(() => {
     if (activeUserId.current === currentUserId) return;
@@ -105,6 +135,14 @@ export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setNextCursor(null);
     loadingMoreRef.current = false;
     setSubscription(null);
+    setMatchPopup(null);
+    setLastMatchedProfile(null);
+    emptyChecks.current = 0;
+    lastCheckAt.current = 0;
+    recheckBusy.current = false;
+    seenMatchIds.current = new Set();
+    matchBaselineReady.current = false;
+    ownSwipeAt.current = new Map();
   }, [currentUserId]);
 
   const refreshSubscription = useCallback(async () => {
@@ -161,6 +199,9 @@ export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!user) return;
     const request = ++deckRequest.current;
     const requestedUserId = user.id;
+    // A full load (start, filters, pull to refresh, "Refresh") restarts the back-off of the silent re-check.
+    emptyChecks.current = 0;
+    lastCheckAt.current = Date.now();
     setLoadingDeck(true);
     try {
       const page = await fetchDiscoveryPage(filters);
@@ -193,6 +234,46 @@ export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, [user, nextCursor, filters]);
 
+  // Silent re-check of an EMPTY deck (screen focus, app foreground, timer on the empty Discover screen). No spinner,
+  // never while a load runs, and spaced by the back-off (15 s ... 5 min) so an idle empty screen costs almost nothing.
+  // Uses the same feed call as a normal load, so filters, blocks, hidden users and the city/distance rules all apply.
+  const recheckDeck = useCallback(
+    async (force = false) => {
+      if (!user) return;
+      const now = Date.now();
+      if (
+        !shouldRecheckDeck({
+          deckLength: deckRef.current.length,
+          busy: loadingDeckRef.current || recheckBusy.current,
+          now,
+          lastCheckAt: lastCheckAt.current,
+          emptyChecks: emptyChecks.current,
+          force,
+        })
+      ) {
+        return;
+      }
+      recheckBusy.current = true;
+      lastCheckAt.current = now;
+      const request = ++deckRequest.current;
+      const requestedUserId = user.id;
+      try {
+        const page = await fetchDiscoveryPage(filters);
+        if (deckRequest.current !== request || activeUserId.current !== requestedUserId) return;
+        if (page.profiles.length > 0) {
+          emptyChecks.current = 0;
+          setDeck(page.profiles);
+          setNextCursor(page.nextCursor);
+        } else {
+          emptyChecks.current += 1;
+        }
+      } finally {
+        recheckBusy.current = false;
+      }
+    },
+    [user, filters],
+  );
+
   // Many events ask for a refresh at once (send, receive, delete, react, call ended...). Coalesce them: while a
   // load is running, further calls only mark that one more load is needed, so a burst costs at most two loads.
   const matchesLoading = useRef<Promise<void> | null>(null);
@@ -213,6 +294,14 @@ export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children
           // The chat on screen is being read: never show it as unread, even if this load raced the mark-read.
           const open = getActiveConversation();
           setMatches(open ? items.map((m) => (m.id.toLowerCase() === open && m.unreadCount ? { ...m, unreadCount: 0 } : m)) : items);
+          // A match that is new to this device and was not made by my own swipe: open the popup (once). The list comes
+          // from the server (RLS and the profile lookup hide blocked and removed matches), so those never show up here.
+          const fresh = items.filter((m) => unseenIds(seenMatchIds.current, [m.id]).length > 0);
+          items.forEach((m) => seenMatchIds.current.add(m.id));
+          if (matchBaselineReady.current) {
+            const other = fresh.find((m) => !isOwnRecentSwipe(ownSwipeAt.current, m.otherUser.id, Date.now()));
+            if (other) setMatchPopup({ matchId: other.id, otherUserId: other.otherUser.id });
+          }
         }
       } while (matchesAgain.current);
     };
@@ -221,6 +310,44 @@ export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children
     });
     return matchesLoading.current;
   }, [user]);
+
+  // Ids only. First call after login sets the baseline (matches that already existed are not "new"); later calls
+  // load the full list only when an id appeared or disappeared, so focusing a screen costs one small query.
+  const syncMatches = useCallback(async () => {
+    if (!user) return;
+    const requestedUserId = user.id;
+    const ids = await fetchMatchIds(user.id);
+    if (!ids || activeUserId.current !== requestedUserId) return;
+    if (!matchBaselineReady.current) {
+      ids.forEach((id) => seenMatchIds.current.add(id));
+      matchBaselineReady.current = true;
+      return;
+    }
+    const serverIds = new Set(ids);
+    const removed = matchesRef.current.some((m) => !serverIds.has(m.id));
+    if (unseenIds(seenMatchIds.current, ids).length === 0 && !removed) return;
+    await refreshMatches();
+    // Matches the list hides (e.g. a blocked person) are known now too, so they do not trigger a reload every time.
+    if (activeUserId.current === requestedUserId) ids.forEach((id) => seenMatchIds.current.add(id));
+  }, [user, refreshMatches]);
+
+  const recheckDeckRef = useRef(recheckDeck);
+  recheckDeckRef.current = recheckDeck;
+  const dismissMatchPopup = useCallback(() => setMatchPopup(null), []);
+
+  // Live matches: the other person's like creates the row; this device only re-reads the list from the server.
+  const refreshMatchesRef = useRef(refreshMatches);
+  refreshMatchesRef.current = refreshMatches;
+  const syncMatchesRef = useRef(syncMatches);
+  syncMatchesRef.current = syncMatches;
+  useEffect(() => {
+    if (!user?.id) return;
+    return subscribeToMyMatches(
+      user.id,
+      () => void refreshMatchesRef.current(),
+      () => void syncMatchesRef.current(),
+    );
+  }, [user?.id]);
 
   useEffect(() => {
     refreshSubscription();
@@ -231,7 +358,12 @@ export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     if (!user?.id) return;
     const sub = AppState.addEventListener("change", (state) => {
-      if (state === "active") void refreshSubscription();
+      if (state === "active") {
+        void refreshSubscription();
+        // Back from the background: catch up on matches made meanwhile and look again if the deck is empty.
+        void syncMatchesRef.current();
+        void recheckDeckRef.current();
+      }
     });
     return () => sub.remove();
   }, [user?.id, refreshSubscription]);
@@ -240,11 +372,12 @@ export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (isLoggedIn && user) {
       refreshDeck();
       refreshMatches();
+      void syncMatches();
     } else {
       setDeck([]);
       setMatches([]);
     }
-  }, [isLoggedIn, user, refreshDeck, refreshMatches]);
+  }, [isLoggedIn, user, refreshDeck, refreshMatches, syncMatches]);
 
   const swipeCard = async (direction: "like" | "pass" | "priority"): Promise<SwipeResponse> => {
     if (!user || deck.length === 0) {
@@ -261,6 +394,7 @@ export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
 
     const requestedUserId = user.id;
+    ownSwipeAt.current.set(target.id, Date.now());
     const res = await submitSwipe(target.id, direction, user.id);
     if (activeUserId.current !== requestedUserId) return res;
     if (remainingDeck.length < 5) void loadMoreDeck();
@@ -269,6 +403,7 @@ export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
 
     if (res.isMatch) {
+      setLastMatchedProfile(target);
       refreshMatches();
     }
 
@@ -278,11 +413,16 @@ export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const swipeProfile = async (targetId: string, direction: "like" | "pass"): Promise<SwipeResponse> => {
     if (!user) return { success: false, isMatch: false, likesRemaining };
     const requestedUserId = user.id;
+    ownSwipeAt.current.set(targetId, Date.now());
+    const matchedFromDeck = deck.find((p) => p.id === targetId) ?? null;
     const res = await submitSwipe(targetId, direction, user.id);
     if (activeUserId.current !== requestedUserId) return res;
     if (res.success) setDeck((prev) => prev.filter((p) => p.id !== targetId));
     if (res.likesRemaining !== undefined && res.success) setLikesRemaining(res.likesRemaining);
-    if (res.isMatch) refreshMatches();
+    if (res.isMatch) {
+      if (matchedFromDeck) setLastMatchedProfile(matchedFromDeck);
+      refreshMatches();
+    }
     return res;
   };
 
@@ -343,6 +483,11 @@ export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children
         loadMoreDeck,
         refreshMatches,
         clearUnread,
+        recheckDeck,
+        syncMatches,
+        matchPopup,
+        dismissMatchPopup,
+        lastMatchedProfile,
       }}
     >
       {children}

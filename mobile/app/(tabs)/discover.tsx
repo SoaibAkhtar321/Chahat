@@ -34,6 +34,7 @@ import {
 } from "../../src/components/discovery/SwipeableCard";
 import { FilterModal } from "../../src/components/discovery/FilterModal";
 import { useMilo } from "../../src/context/MiloContext";
+import { useDiscoverLiveSync } from "../../src/hooks/useDiscoverLiveSync";
 import { hasEntitlement } from "../../src/services/subscription";
 import { isLocationSharingEnabled } from "../../src/services/location";
 import { loadLocationSelection } from "../../src/services/locationSelection";
@@ -60,12 +61,16 @@ export default function DiscoverScreen() {
     triggerBoost,
     setFilters,
     refreshDeck,
+    recheckDeck,
+    syncMatches,
   } = useMilo();
 
   const [filterModalVisible, setFilterModalVisible] = useState(false);
   const [swiping, setSwiping] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const cardRef = useRef<SwipeableCardHandle>(null);
+  // New matches (ids only) and new profiles for an empty deck: on focus, on foreground, and on a slow back-off timer.
+  useDiscoverLiveSync({ deckEmpty: !currentProfile && !loadingDeck, recheckDeck, syncMatches });
   // Sponsored cards from the admin panel: one after every AD_EVERY_SWIPES profile swipes, when any are running.
   const [adQueue, setAdQueue] = useState<DiscoverAd[]>([]);
   const [swipesSinceAd, setSwipesSinceAd] = useState(0);
@@ -166,7 +171,7 @@ export default function DiscoverScreen() {
     if (res.isMatch) {
       router.push({
         pathname: "/match/[id]",
-        params: { id: targetId },
+        params: { id: targetId, ...(res.matchId ? { matchId: res.matchId } : {}) },
       });
     }
   };
@@ -350,7 +355,7 @@ export default function DiscoverScreen() {
             />
             <View style={styles.emptySecondary}>
               <Button
-                title="Refresh"
+                title="Check again"
                 variant="text"
                 size="sm"
                 onPress={handlePullRefresh}

@@ -171,7 +171,7 @@ export default function ProfileDetailScreen() {
     const res = await swipeProfile(targetProfile.id, dir);
     setActing(false);
     if (res.isMatch) {
-      router.replace({ pathname: "/match/[id]", params: { id: targetProfile.id } });
+      router.replace({ pathname: "/match/[id]", params: { id: targetProfile.id, ...(res.matchId ? { matchId: res.matchId } : {}) } });
       return;
     }
     if (!res.success) {

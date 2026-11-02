@@ -13,13 +13,14 @@ export default function MatchScreen() {
   const { colors: Colors } = useTheme();
   const styles = useMemo(() => createStyles(Colors), [Colors]);
   const router = useRouter();
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { id, matchId: matchIdParam } = useLocalSearchParams<{ id: string; matchId?: string }>();
   const { profile: myProfile } = useAuth();
-  const { deck, matches } = useMilo();
+  const { deck, matches, lastMatchedProfile } = useMilo();
 
   const otherUser =
     deck.find((p) => p.id === id) ||
-    matches.find((m) => m.otherUser.id === id || m.id === id)?.otherUser || {
+    matches.find((m) => m.otherUser.id === id || m.id === id)?.otherUser ||
+    (lastMatchedProfile?.id === id ? lastMatchedProfile : null) || {
       id: id || "unknown",
       name: "Your Match",
       photos: [],
@@ -63,7 +64,8 @@ export default function MatchScreen() {
         <TouchableOpacity
           style={styles.chatButton}
           onPress={() => {
-            const matchId = matches.find((m) => m.otherUser.id === id)?.id || id;
+            // The list may not have loaded yet: the swipe result / live event already carries the real match id.
+            const matchId = matches.find((m) => m.otherUser.id === id)?.id || matchIdParam || id;
             router.replace({
               pathname: "/chat/[id]",
               params: { id: matchId },
