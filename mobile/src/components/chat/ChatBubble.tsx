@@ -9,7 +9,8 @@ import { getAudioPlayerAdapter } from "../../services/voiceMedia";
 import { formatClock, isRecordingSession, useRecordingSession } from "../../services/voiceSession";
 import { DELETED_BY_ME_PREVIEW_TEXT, DELETED_PREVIEW_TEXT } from "../../utils/messageState";
 import type { ReactionSummary } from "../../utils/reactions";
-import { replyAuthorLabel, replySnippet } from "../../utils/replies";
+import { canReplyTo, replyAuthorLabel, replySnippet } from "../../utils/replies";
+import { SwipeToReply } from "./SwipeToReply";
 import { callEventLabel, isMissedForViewer, parseCallEvent } from "../../utils/callEvents";
 
 interface ChatBubbleProps {
@@ -31,6 +32,8 @@ interface ChatBubbleProps {
   onImagePress?: (uri: string) => void;
   /** Signs a voice note path again (live message without URL, or an expired link). */
   resolveAudioUrl?: (path: string) => Promise<string | undefined>;
+  /** Swipe the bubble to the right: set it as the reply target (same flow as the "Reply" menu item). Omit to disable. */
+  onSwipeReply?: (message: Message) => void;
 }
 
 export const ChatBubble: React.FC<ChatBubbleProps> = ({
@@ -44,6 +47,7 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({
   onReplyPress,
   onImagePress,
   resolveAudioUrl,
+  onSwipeReply,
 }) => {
   const { colors: Colors } = useTheme();
   const styles = useMemo(() => createStyles(Colors), [Colors]);
@@ -263,6 +267,11 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({
         </View>
       )}
 
+      <SwipeToReply
+        enabled={!!onSwipeReply && canReplyTo(message)}
+        onReply={() => onSwipeReply?.(message)}
+        testID={`message-swipe-${message.id}`}
+      >
       <View style={[styles.row, isMe ? styles.rowMe : styles.rowThem]}>
         <Pressable
           testID={`message-bubble-${message.id}`}
@@ -488,6 +497,7 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({
           ))}
         </View>
       ) : null}
+      </SwipeToReply>
     </View>
   );
 };

@@ -5,6 +5,9 @@ import {
   Text,
   StyleSheet,
   FlatList,
+  type LayoutChangeEvent,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
   TextInput,
   TouchableOpacity,
   KeyboardAvoidingView,
@@ -38,7 +41,7 @@ import {
   Trash2,
   X,
 } from "lucide-react-native";
-import { Radii, Typography, ThemeColors, Layout, Spacing } from "../../src/constants/theme";
+import { Radii, Shadows, Typography, ThemeColors, Layout, Spacing } from "../../src/constants/theme";
 import { useTheme } from "../../src/context/ThemeContext";
 import { ChatBubble } from "../../src/components/chat/ChatBubble";
 import { MessageActionSheet } from "../../src/components/chat/MessageActionSheet";
@@ -111,6 +114,13 @@ import {
   replyAuthorLabel,
   replySnippet,
 } from "../../src/utils/replies";
+import {
+  actionOnContentChange,
+  actionOnViewportChange,
+  bottomOffset,
+  isNearBottom,
+  type ScrollMetrics,
+} from "../../src/utils/chatScroll";
 import type { Message, Profile } from "../../src/types";
 
 export default function ChatDetailScreen() {
@@ -177,6 +187,57 @@ export default function ChatDetailScreen() {
   // The recording timer can stop a voice note from a stale closure, so it reads the draft through a ref.
   const replyDraftRef = useRef<Message | null>(null);
   replyDraftRef.current = replyDraft;
+
+  // Keeps the newest message visible (see utils/chatScroll.ts). Refs, not state: they change on every scroll frame.
+  const scrollMetricsRef = useRef<ScrollMetrics>({ offsetY: 0, viewportHeight: 0, contentHeight: 0 });
+  const newestIdRef = useRef<string | null>(null);
+  // Messages that arrived while the reader was scrolled up: drives the "new message" jump button.
+  const [unseenIncoming, setUnseenIncoming] = useState(0);
+
+  const scrollToBottom = (animated = false) => {
+    const m = scrollMetricsRef.current;
+    // Record where this lands, so a size change that arrives before the scroll event still counts as "at the bottom".
+    m.offsetY = bottomOffset(m.contentHeight, m.viewportHeight);
+    flatListRef.current?.scrollToEnd({ animated });
+    if (!animated) {
+      // Rows (photos, quotes) and the keyboard padding can settle one frame later: land on the true end.
+      requestAnimationFrame(() => flatListRef.current?.scrollToEnd({ animated: false }));
+    }
+  };
+
+  const handleListScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { contentOffset, layoutMeasurement, contentSize } = e.nativeEvent;
+    const m = scrollMetricsRef.current;
+    m.offsetY = contentOffset.y;
+    m.viewportHeight = layoutMeasurement.height;
+    m.contentHeight = contentSize.height;
+    // Back at the bottom: whatever arrived meanwhile has now been seen.
+    if (isNearBottom(m)) setUnseenIncoming((count) => (count === 0 ? count : 0));
+  };
+
+  // The visible height of the list changes when the keyboard opens or closes (or the reply bar appears).
+  const handleListLayout = (e: LayoutChangeEvent) => {
+    const m = scrollMetricsRef.current;
+    const height = e.nativeEvent.layout.height;
+    if (height === m.viewportHeight) return;
+    const wasNearBottom = isNearBottom(m); // judged with the OLD height, before the keyboard moved the edge
+    m.viewportHeight = height;
+    if (actionOnViewportChange(wasNearBottom) === "scroll") scrollToBottom(false);
+  };
+
+  const handleListContentSizeChange = (_w: number, height: number) => {
+    const m = scrollMetricsRef.current;
+    const wasNearBottom = isNearBottom(m); // judged with the OLD content height, before the new row was added
+    m.contentHeight = height;
+    const list = messagesRef.current;
+    const newest = list.length ? list[list.length - 1]! : null;
+    const newestId = newest?.id ?? null;
+    const newestChanged = newestId !== newestIdRef.current;
+    newestIdRef.current = newestId;
+    const action = actionOnContentChange({ wasNearBottom, newestChanged, newestFromMe: newest?.from === "me" });
+    if (action === "scroll") scrollToBottom(false);
+    else if (action === "badge") setUnseenIncoming((count) => count + 1);
+  };
 
   const deletionContext = () => ({
     hidden: hiddenIdsRef.current,
@@ -878,9 +939,13 @@ export default function ChatDetailScreen() {
         behavior="padding"
         style={styles.chatArea}
       >
+        <View style={styles.listArea}>
         <FlatList
           keyboardShouldPersistTaps="handled"
           ref={flatListRef}
+          onScroll={handleListScroll}
+          scrollEventThrottle={16}
+          onLayout={handleListLayout}
           data={messages}
           extraData={reactions}
           keyExtractor={(item) => item.id}
@@ -897,6 +962,7 @@ export default function ChatDetailScreen() {
               replyUnavailable={isReplyUnavailable(item, messages, deletionContext())}
               onReplyPress={scrollToMessage}
               onImagePress={setViewerUri}
+              onSwipeReply={startReply}
               showDayHeader={
                 index === 0 ||
                 new Date(messages[index - 1]!.at).toDateString() !==
@@ -913,7 +979,7 @@ export default function ChatDetailScreen() {
               250,
             );
           }}
-          onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: false })}
+          onContentSizeChange={handleListContentSizeChange}
           ListEmptyComponent={
             <View style={styles.emptyMessages}>
               <ProfilePhoto
@@ -937,6 +1003,23 @@ export default function ChatDetailScreen() {
             </View>
           }
         />
+        {unseenIncoming > 0 && (
+          <TouchableOpacity
+            style={styles.jumpToNewButton}
+            onPress={() => {
+              setUnseenIncoming(0);
+              scrollToBottom(true);
+            }}
+            accessibilityRole="button"
+            accessibilityLabel={unseenIncoming === 1 ? "Jump to new message" : `Jump to ${unseenIncoming} new messages`}
+            testID="chat-jump-to-new"
+            activeOpacity={0.85}
+          >
+            <ChevronDown size={16} color={Colors.primaryForeground} />
+            <Text style={styles.jumpToNewText}>{unseenIncoming === 1 ? "New message" : `${unseenIncoming} new messages`}</Text>
+          </TouchableOpacity>
+        )}
+        </View>
 
         {/* Selected image preview */}
         {selectedImages.length > 0 && (
@@ -1402,6 +1485,27 @@ const createStyles = (Colors: ThemeColors) => StyleSheet.create({
   },
   chatArea: {
     flex: 1,
+  },
+  listArea: {
+    flex: 1,
+  },
+  jumpToNewButton: {
+    position: "absolute",
+    alignSelf: "center",
+    bottom: Spacing.md,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: Spacing.xs,
+    paddingVertical: Spacing.sm,
+    paddingHorizontal: Spacing.md,
+    borderRadius: Radii.full,
+    backgroundColor: Colors.primary,
+    ...Shadows.card,
+  },
+  jumpToNewText: {
+    color: Colors.primaryForeground,
+    fontSize: Typography.sizes.sm,
+    fontWeight: Typography.weights.medium,
   },
   messageList: {
     paddingVertical: Spacing.lg,
