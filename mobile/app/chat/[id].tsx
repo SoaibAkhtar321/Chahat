@@ -725,6 +725,11 @@ export default function ChatDetailScreen() {
         "Message unavailable",
         "The message you were replying to is no longer available. Your voice message was not sent.",
       );
+    } else if (/row-level security|violates/i.test(res.error ?? "")) {
+      // Blocked or unmatched since the chat opened: same handling as a text message, never database text.
+      if (await leaveIfUnmatched()) return;
+      await refreshBlockState();
+      Alert.alert("Voice message not sent", `Unblock ${otherUser.name} to send messages.`);
     } else {
       Alert.alert("Couldn't send voice message", res.error || "Please check your connection and try again.");
     }

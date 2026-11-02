@@ -44,7 +44,7 @@ jest.mock("react-native-safe-area-context", () => {
 });
 jest.mock("expo-router", () => ({
   useLocalSearchParams: () => ({ id: "f6c60000-0000-4000-8000-000000000001" }),
-  useRouter: () => ({ back: jest.fn(), push: jest.fn() }),
+  useRouter: () => ({ back: jest.fn(), push: jest.fn(), replace: jest.fn(), canGoBack: () => true }),
   useFocusEffect: () => undefined,
 }));
 jest.mock("expo-image", () => {
@@ -60,7 +60,15 @@ jest.mock("../mobile/src/context/MiloContext", () => ({ useMilo: () => mockMiloV
 jest.mock("../mobile/src/services/activeConversation", () => ({ setActiveConversation: jest.fn(), clearActiveConversation: jest.fn() }));
 jest.mock("../mobile/src/services/calls", () => ({ buildNewCallRoute: jest.fn() }));
 jest.mock("../mobile/src/services/callMedia", () => ({ isCallingAvailable: () => false }));
-jest.mock("../mobile/src/services/moderation", () => ({ blockUser: jest.fn(), reportUser: jest.fn(), unmatchUser: jest.fn() }));
+const mockMatchStillExists = jest.fn(async (..._a: unknown[]) => true as boolean | null);
+jest.mock("../mobile/src/services/moderation", () => ({
+  blockUser: jest.fn(),
+  reportUser: jest.fn(),
+  unmatchUser: jest.fn(),
+  fetchBlockedUsers: jest.fn(async () => []),
+  unblockUser: jest.fn(),
+  matchStillExists: (...a: unknown[]) => mockMatchStillExists(...a),
+}));
 const mockRecorder = {
   requestPermissionsAsync: jest.fn(),
   startRecordingAsync: jest.fn(),
@@ -191,6 +199,26 @@ describe("chat composer voice messages", () => {
     await press("voice-send");
     expect(mockAlert).toHaveBeenCalledWith(expect.stringMatching(/couldn't send/i), "Network request failed");
     expect(mockCleanup).toHaveBeenCalledWith(RESULT.uri);
+  });
+
+  test("a voice note sent after being blocked shows calm text, never the database error", async () => {
+    mockSendVoice.mockResolvedValue({ success: false, error: 'new row violates row-level security policy for table "objects"' });
+    await mount();
+    await press("voice-record");
+    await press("voice-send");
+    expect(mockAlert).toHaveBeenCalledWith("Voice message not sent", expect.stringMatching(/Unblock .* to send messages/));
+    expect(mockAlert).not.toHaveBeenCalledWith(expect.anything(), expect.stringMatching(/row-level/i));
+    expect(mockCleanup).toHaveBeenCalledWith(RESULT.uri);
+  });
+
+  test("a voice note sent after the other person unmatched leaves the conversation", async () => {
+    mockSendVoice.mockResolvedValue({ success: false, error: "new row violates row-level security policy" });
+    await mount();
+    mockMatchStillExists.mockResolvedValue(false); // from now on the match is gone
+    await press("voice-record");
+    await press("voice-send");
+    expect(mockAlert).toHaveBeenCalledWith("Conversation ended", expect.any(String));
+    expect(mockAlert).not.toHaveBeenCalledWith("Voice message not sent", expect.anything());
   });
 
   test("leaving the chat mid-recording discards the recording", async () => {
