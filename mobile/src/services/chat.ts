@@ -536,7 +536,6 @@ export async function setMessageReaction(messageId: string, emoji: string | null
   }
 }
 
-/** Marks the other person's messages (text, voice, photo) as read. true only when the server confirmed it. Never throws. */
 /**
  * Cheap check used on screen focus / app foreground: only the ids of my matches (one small query). Returns null when
  * the query failed, so a failure is never mistaken for "no matches".
@@ -585,6 +584,7 @@ export function subscribeToMyMatches(currentUserId: string, onChange: () => void
   };
 }
 
+/** Marks the other person's messages (text, voice, photo) as read. true only when the server confirmed it. Never throws. */
 export async function markChatRead(matchId: string, _currentUserId?: string): Promise<boolean> {
   try {
     if (!matchId || !isValidUUID(matchId)) return false;

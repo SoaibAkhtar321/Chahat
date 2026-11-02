@@ -122,6 +122,34 @@ describe("live matches", () => {
     expect(ctx.lastMatchedProfile?.id).toBe("u3"); // match screen can still show them
   });
 
+  it("I liked (no match) and they like me back within seconds: the live path still opens the popup", async () => {
+    mockFetchPage.mockResolvedValue({ profiles: [P("u3")], nextCursor: null });
+    await mount();
+    mockSubmitSwipe.mockResolvedValue({ success: true, isMatch: false, likesRemaining: 9 });
+    await act(async () => {
+      await ctx.swipeCard("like");
+    });
+    await flush();
+    // 2 s later (inside the 20 s own-swipe window) the other person likes me back
+    mockFetchMatches.mockResolvedValue([M("m3", "u3"), M("m1", "u1")]);
+    await act(async () => mockOnChange());
+    await flush();
+    expect(ctx.matchPopup).toEqual({ matchId: "m3", otherUserId: "u3" });
+  });
+
+  it("same after a like from the profile screen (swipeProfile) that was not a match", async () => {
+    mockFetchPage.mockResolvedValue({ profiles: [P("u3")], nextCursor: null });
+    await mount();
+    mockSubmitSwipe.mockResolvedValue({ success: true, isMatch: false, likesRemaining: 9 });
+    await act(async () => {
+      await ctx.swipeProfile("u3", "like");
+    });
+    mockFetchMatches.mockResolvedValue([M("m3", "u3"), M("m1", "u1")]);
+    await act(async () => mockOnChange());
+    await flush();
+    expect(ctx.matchPopup).toEqual({ matchId: "m3", otherUserId: "u3" });
+  });
+
   it("a reconnect catches up on matches missed while offline", async () => {
     await mount();
     mockFetchIds.mockResolvedValue(["m1", "m9"]);

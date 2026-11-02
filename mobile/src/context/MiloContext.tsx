@@ -396,6 +396,8 @@ export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const requestedUserId = user.id;
     ownSwipeAt.current.set(target.id, Date.now());
     const res = await submitSwipe(target.id, direction, user.id);
+    // Only a swipe that made a match may hide the live popup; otherwise the other person's later like must still show it.
+    if (!res.isMatch) ownSwipeAt.current.delete(target.id);
     if (activeUserId.current !== requestedUserId) return res;
     if (remainingDeck.length < 5) void loadMoreDeck();
     if (res.likesRemaining !== undefined) {
@@ -416,6 +418,7 @@ export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children
     ownSwipeAt.current.set(targetId, Date.now());
     const matchedFromDeck = deck.find((p) => p.id === targetId) ?? null;
     const res = await submitSwipe(targetId, direction, user.id);
+    if (!res.isMatch) ownSwipeAt.current.delete(targetId);
     if (activeUserId.current !== requestedUserId) return res;
     if (res.success) setDeck((prev) => prev.filter((p) => p.id !== targetId));
     if (res.likesRemaining !== undefined && res.success) setLikesRemaining(res.likesRemaining);
