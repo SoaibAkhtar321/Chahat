@@ -4,6 +4,8 @@
 
 Available on Android. Made in India.
 
+> 🔒 **Private repository.** This code and its documentation are proprietary and confidential. They are not open source and are not open to outside contributions.
+
 ---
 
 ## Why Chahat?
@@ -71,7 +73,9 @@ Legal pages and support: https://chahatlegal.netlify.app
 
 ---
 
-## For developers
+## For the Chahat team
+
+Notes for the people who work on this private codebase.
 
 Everything above is built with:
 
@@ -123,13 +127,18 @@ Good places to start: `docs/CALLS.md`, `docs/PLAN_CATALOG.md`, `docs/DEPLOYMENT_
 
 ---
 
-## Contributing
+## Working on the code
+
+This repository is private. Access is limited to the Chahat team, and the code, database schema and keys must not be shared outside it.
 
 1. Create a branch from `main`.
 2. Add tests for every change.
 3. Make sure `npm run lint`, `npm run build` and `npm test -- --ci` pass.
-4. Open a pull request.
+4. Push the branch and merge it into `main`.
+5. If you added a database migration, run `.\deploy-migrations.ps1` and check that nothing is left pending.
+
+Never commit secrets (passwords, service role keys, signing keys). See `docs/SECRETS_CHECKLIST.md`.
 
 ---
 
-© Chahat. All rights reserved.
+© Chahat. All rights reserved. Proprietary and confidential. Unauthorized copying, sharing or distribution is not permitted.
