@@ -55,7 +55,8 @@ beforeEach(() => {
   mockPlay.mockResolvedValue({ success: true });
   panConfig = undefined;
   jest.spyOn(PanResponder, "create").mockImplementation((cfg: any) => {
-    panConfig = cfg;
+    // Only the seek responder (it alone uses the capture phase); the swipe-to-reply wrapper also creates one.
+    if (cfg.onMoveShouldSetPanResponderCapture) panConfig = cfg;
     return realCreate(cfg);
   });
   alertSpy = jest.spyOn(Alert, "alert").mockImplementation(() => undefined);
