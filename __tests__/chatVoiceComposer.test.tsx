@@ -18,7 +18,8 @@ const mockMatches = [
     unreadCount: 0,
   },
 ];
-const mockMiloValue = { matches: mockMatches, refreshMatches: (...a: unknown[]) => mockRefresh(...a) };
+const mockClearUnread = jest.fn();
+const mockMiloValue = { matches: mockMatches, refreshMatches: (...a: unknown[]) => mockRefresh(...a), clearUnread: (...a: unknown[]) => mockClearUnread(...a) };
 
 const mockFetch = jest.fn();
 const mockDelete = jest.fn();
@@ -66,12 +67,13 @@ const mockRecorder = {
   stopRecordingAsync: jest.fn(),
   cancelRecordingAsync: jest.fn(async () => undefined),
 };
+const mockPlayer = { stopAsync: jest.fn(async () => undefined), pauseAsync: jest.fn(async () => undefined), playAsync: jest.fn() };
 const mockCleanup = jest.fn(async () => undefined);
 jest.mock("../mobile/src/services/voiceMedia", () => ({
   VOICE_LIMITS: { maxDurationMs: 60000 },
   getAudioRecorderAdapter: () => mockRecorder,
   cleanupAbandonedVoiceFile: (...a: unknown[]) => mockCleanup(...a),
-  getAudioPlayerAdapter: () => ({ stopAsync: jest.fn(async () => undefined), pauseAsync: jest.fn(async () => undefined), playAsync: jest.fn() }),
+  getAudioPlayerAdapter: () => mockPlayer,
 }));
 const mockSendVoice = jest.fn();
 // Expo inlines EXPO_PUBLIC_* at transform time, so the flag is controlled through the config module.
@@ -196,5 +198,92 @@ describe("chat composer voice messages", () => {
     await press("voice-record");
     await act(async () => { renderer.unmount(); });
     expect(mockRecorder.cancelRecordingAsync).toHaveBeenCalled();
+  });
+});
+
+describe("Phase B: recording never overlaps playback", () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { isRecordingSession } = require("../mobile/src/services/voiceSession");
+
+  test("starting a recording stops playing audio first and blocks playback until it ends", async () => {
+    await mount();
+    const order: string[] = [];
+    mockPlayer.stopAsync.mockImplementation(async () => {
+      order.push("stop-playback");
+    });
+    mockRecorder.startRecordingAsync.mockImplementation(async () => {
+      order.push("start-mic");
+      return { success: true };
+    });
+    await press("voice-record");
+    expect(order).toEqual(["stop-playback", "start-mic"]);
+    expect(isRecordingSession()).toBe(true);
+
+    await press("voice-send");
+    expect(isRecordingSession()).toBe(false);
+  });
+
+  test("cancel releases the block", async () => {
+    await mount();
+    await press("voice-record");
+    expect(isRecordingSession()).toBe(true);
+    await press("voice-cancel");
+    expect(isRecordingSession()).toBe(false);
+  });
+
+  test("denied permission and a failed start do not leave playback blocked", async () => {
+    mockRecorder.requestPermissionsAsync.mockResolvedValue({ granted: false, canAskAgain: true });
+    await mount();
+    await press("voice-record");
+    expect(isRecordingSession()).toBe(false);
+
+    mockRecorder.requestPermissionsAsync.mockResolvedValue({ granted: true, canAskAgain: true });
+    mockRecorder.startRecordingAsync.mockResolvedValue({ success: false, error: "busy" });
+    await press("voice-record");
+    expect(isRecordingSession()).toBe(false);
+  });
+
+  test("leaving the chat mid-recording releases the block", async () => {
+    await mount();
+    await press("voice-record");
+    expect(isRecordingSession()).toBe(true);
+    await act(async () => { renderer.unmount(); });
+    await flush();
+    expect(isRecordingSession()).toBe(false);
+  });
+});
+
+describe("Phase C: seen messages clear the unread badge", () => {
+  test("opening the chat marks it read and clears the badge once the server confirmed", async () => {
+    mockMarkRead.mockResolvedValue(true);
+    await mount();
+    expect(mockMarkRead).toHaveBeenCalledWith(MATCH, ME);
+    expect(mockClearUnread).toHaveBeenCalledWith(MATCH);
+  });
+
+  test("a failed mark-read does not clear the badge", async () => {
+    mockMarkRead.mockResolvedValue(false);
+    await mount();
+    expect(mockClearUnread).not.toHaveBeenCalled();
+  });
+
+  test("a message arriving while the chat is open (voice, photo or text) is marked read and cleared", async () => {
+    mockMarkRead.mockResolvedValue(true);
+    await mount();
+    mockMarkRead.mockClear();
+    mockClearUnread.mockClear();
+    await act(async () => {
+      mockOnReceived!({ id: "v1", matchId: MATCH, sender: THEM, from: "them", text: "Voice message", messageType: "voice", at: 9000, status: "sent", deletedAt: null });
+    });
+    await flush();
+    expect(mockMarkRead).toHaveBeenCalledTimes(1);
+    expect(mockClearUnread).toHaveBeenCalledWith(MATCH);
+
+    // My own message is not "unread": nothing to mark.
+    mockMarkRead.mockClear();
+    await act(async () => {
+      mockOnReceived!({ id: "v2", matchId: MATCH, sender: ME, from: "me", text: "hi", messageType: "text", at: 9500, status: "sent", deletedAt: null });
+    });
+    expect(mockMarkRead).not.toHaveBeenCalled();
   });
 });

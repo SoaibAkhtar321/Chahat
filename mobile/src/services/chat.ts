@@ -452,7 +452,8 @@ export async function sendVoiceMessage(
       };
     }
 
-    const signedUrl = (await getSignedUrl("chat", audioPath)) ?? audioUri;
+    // No fallback to the local file: it is deleted right after sending. Without a URL the bubble signs on tap.
+    const signedUrl = await getSignedUrl("chat", audioPath);
     const newMsg: Message = {
       id: messageId,
       matchId,
@@ -460,6 +461,7 @@ export async function sendVoiceMessage(
       from: "me",
       text: "Voice message",
       audio: signedUrl,
+      audioPath,
       audioDurationSec: durationSec,
       messageType: "voice",
       at: Date.now(),
@@ -534,13 +536,35 @@ export async function setMessageReaction(messageId: string, emoji: string | null
   }
 }
 
-export async function markChatRead(matchId: string, _currentUserId?: string): Promise<void> {
+/** Marks the other person's messages (text, voice, photo) as read. true only when the server confirmed it. Never throws. */
+export async function markChatRead(matchId: string, _currentUserId?: string): Promise<boolean> {
   try {
-    if (!matchId || !isValidUUID(matchId)) return;
+    if (!matchId || !isValidUUID(matchId)) return false;
     // Server-timed and member-checked; marks only the other person's messages.
-    await supabase.rpc("mark_chat_read", { _match_id: matchId });
+    const res: any = await supabase.rpc("mark_chat_read", { _match_id: matchId });
+    return !res?.error;
   } catch {
-    // Ignore mark read errors
+    return false;
+  }
+}
+
+/** Paths of a live (Realtime) row that need a signed URL. Deleted rows and unopened View Once photos from the partner are skipped. */
+export function realtimeMediaPaths(row: any, currentUserId?: string): string[] {
+  if (!row || row.deleted_at) return [];
+  const paths: string[] = [];
+  if (row.audio_path) paths.push(row.audio_path);
+  const hiddenViewOnce = !!row.is_view_once && row.sender !== currentUserId && !row.viewed_at;
+  if (row.image_path && !hiddenViewOnce) paths.push(row.image_path);
+  return paths;
+}
+
+/** Fresh signed URL for a chat media path (lazy signing and retry of an expired voice note link). */
+export async function resolveChatMediaUrl(path: string): Promise<string | undefined> {
+  if (!path) return undefined;
+  try {
+    return await getSignedUrl("chat", path);
+  } catch {
+    return undefined;
   }
 }
 
@@ -582,24 +606,37 @@ export function subscribeToMatchMessages(
       (payload) => {
         const msg = payload.new;
         if (!msg) return;
-        onMessageReceived(mapMessageRow(msg, currentUserId ?? ""));
+        const deliver = (signed: Record<string, string | undefined> = {}) => {
+          onMessageReceived(mapMessageRow(msg, currentUserId ?? "", signed));
 
-        // If the incoming message is from the other user, dispatch to in-app notifications
-        if (currentUserId && msg.sender !== currentUserId && msg.message_type !== "system") {
-          pushNotificationToInbox(currentUserId, {
-            kind: "message",
-            title: "New Message",
-            text: msg.body
-              ? msg.body.length > 50
-                ? `${msg.body.slice(0, 50)}...`
-                : msg.body
-              : "Sent a photo",
-            data: {
-              matchId,
-              senderId: msg.sender,
-            },
-          }).catch(() => {});
+          // If the incoming message is from the other user, dispatch to in-app notifications
+          if (currentUserId && msg.sender !== currentUserId && msg.message_type !== "system") {
+            pushNotificationToInbox(currentUserId, {
+              kind: "message",
+              title: "New Message",
+              text: msg.body
+                ? msg.body.length > 50
+                  ? `${msg.body.slice(0, 50)}...`
+                  : msg.body
+                : "Sent a photo",
+              data: {
+                matchId,
+                senderId: msg.sender,
+              },
+            }).catch(() => {});
+          }
+        };
+
+        // Realtime rows carry only storage paths. Sign voice/photo paths first so a live voice note plays on the
+        // first tap. Text messages stay synchronous.
+        const paths = realtimeMediaPaths(msg, currentUserId);
+        if (paths.length === 0) {
+          deliver();
+          return;
         }
+        getSignedUrls("chat", paths)
+          .then((signed) => deliver(signed))
+          .catch(() => deliver()); // The bubble signs lazily on tap if this failed.
       },
     )
     .on(

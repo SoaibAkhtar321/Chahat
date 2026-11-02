@@ -59,6 +59,7 @@ import {
   fetchReactionsForMatch,
   setMessageReaction,
   subscribeToMatchMessages,
+  resolveChatMediaUrl,
 } from "../../src/services/chat";
 import {
   canDeleteForEveryone as canDeleteMessageForEveryone,
@@ -89,6 +90,7 @@ import {
   unblockUser,
   unmatchUser,
 } from "../../src/services/moderation";
+import { isRecordingSession, setRecordingSession } from "../../src/services/voiceSession";
 import { supabase } from "../../src/services/supabase";
 import { joinChatPresence, type ChatPresence } from "../../src/services/chatPresence";
 import { presenceLabel } from "../../src/utils/typingState";
@@ -119,7 +121,7 @@ export default function ChatDetailScreen() {
   // Off unless EXPO_PUBLIC_FEATURE_VOICE_MESSAGES is exactly "true" (development/test builds only).
   const voiceEnabled = isServiceConfigured("voiceMessages");
   const { user } = useAuth();
-  const { matches, refreshMatches } = useMilo();
+  const { matches, refreshMatches, clearUnread } = useMilo();
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState("");
@@ -271,10 +273,17 @@ export default function ChatDetailScreen() {
     if (!matchId || !user) return;
     let cancelled = false;
 
+    // Seen = read: tell the server, and only when it confirmed, clear the badge on the list and the tab now.
+    const markReadAndClear = () => {
+      void Promise.resolve(markChatRead(matchId, user.id)).then((ok) => {
+        if (ok !== false && !cancelled) clearUnread?.(matchId);
+      });
+    };
+
     fetchMessagesForMatch(matchId, user.id).then((msgs) => {
       if (cancelled) return;
       setMessages(reconcileFetched(msgs, deletionContext()));
-      markChatRead(matchId, user.id);
+      markReadAndClear();
     });
     fetchReactionsForMatch(matchId).then((rows) => {
       if (!cancelled) setReactions(buildReactionMap(rows));
@@ -311,7 +320,7 @@ export default function ChatDetailScreen() {
       (newMsg) => {
         setMessages((prev) => appendIncoming(prev, newMsg, deletionContext()));
         if (newMsg.from === "them") {
-          markChatRead(matchId, user.id);
+          markReadAndClear();
         }
       },
       user.id,
@@ -338,7 +347,7 @@ export default function ChatDetailScreen() {
       if (receiptTimer) clearTimeout(receiptTimer);
       supabase.removeChannel(channel);
     };
-  }, [matchId, user]);
+  }, [matchId, user, clearUnread]);
 
   // Online + typing for this chat (Realtime presence/broadcast, nothing stored). Reset when the chat changes.
   useEffect(() => {
@@ -568,10 +577,19 @@ export default function ChatDetailScreen() {
   };
 
   const handleStartRecording = async () => {
-    if (recordingActiveRef.current || sending) return;
+    if (recordingActiveRef.current || sending || isRecordingSession()) return;
+    // Block playback first (play buttons disable at once), then silence anything already playing:
+    // the microphone must never hear a voice note.
+    setRecordingSession(true);
+    try {
+      await getAudioPlayerAdapter().stopAsync();
+    } catch {
+      // Nothing was playing.
+    }
     const adapter = getAudioRecorderAdapter();
     const perm = await adapter.requestPermissionsAsync();
     if (!perm.granted) {
+      setRecordingSession(false);
       Alert.alert(
         "Microphone access needed",
         perm.canAskAgain
@@ -583,6 +601,7 @@ export default function ChatDetailScreen() {
 
     const startRes = await adapter.startRecordingAsync(VOICE_LIMITS.maxDurationMs);
     if (!startRes.success) {
+      setRecordingSession(false);
       Alert.alert("Voice message", startRes.error || "Could not start recording.");
       return;
     }
@@ -609,6 +628,7 @@ export default function ChatDetailScreen() {
 
     const adapter = getAudioRecorderAdapter();
     const stopRes = await adapter.stopRecordingAsync();
+    setRecordingSession(false); // the recorder has restored the audio mode: playback is allowed again
     if (!stopRes.success || !stopRes.result) {
       if (stopRes.error) Alert.alert("Voice message", stopRes.error);
       return;
@@ -655,6 +675,7 @@ export default function ChatDetailScreen() {
     setIsRecording(false);
     setRecordingSeconds(0);
     await getAudioRecorderAdapter().cancelRecordingAsync();
+    setRecordingSession(false);
   };
 
   // Leaving the chat mid-recording discards it instead of leaving the microphone open.
@@ -663,7 +684,7 @@ export default function ChatDetailScreen() {
       if (recordingActiveRef.current) {
         recordingActiveRef.current = false;
         if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
-        void getAudioRecorderAdapter().cancelRecordingAsync();
+        void Promise.resolve(getAudioRecorderAdapter().cancelRecordingAsync()).finally(() => setRecordingSession(false));
       }
       void getAudioPlayerAdapter().stopAsync();
     };
@@ -866,6 +887,7 @@ export default function ChatDetailScreen() {
           renderItem={({ item, index }) => (
             <ChatBubble
               message={item}
+              resolveAudioUrl={resolveChatMediaUrl}
               onLongPress={openMessageActions}
               reactions={summarizeReactions(reactions[item.id], user?.id)}
               onReactionPress={(m, emoji) =>

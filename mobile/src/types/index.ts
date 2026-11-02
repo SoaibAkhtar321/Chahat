@@ -99,6 +99,8 @@ export interface Message {
   text: string;
   image?: string;
   audio?: string;
+  /** Storage path of the voice note; lets the bubble (re)sign the URL when `audio` is missing or expired. */
+  audioPath?: string;
   audioDurationSec?: number;
   messageType?: "text" | "image" | "voice" | "system";
   isViewOnce?: boolean;

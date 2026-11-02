@@ -2,6 +2,8 @@
 // Manages runtime microphone permissions, voice note duration limits, file size constraints,
 // audio adapters, and local file cleanup.
 
+import { isRecordingSession, PLAYBACK_BLOCKED_BY_RECORDING } from "./voiceSession";
+
 export const VOICE_LIMITS = {
   maxDurationMs: 60_000, // 60 seconds maximum voice note duration
   minDurationMs: 500, // Reject accidental taps under 500ms
@@ -49,7 +51,10 @@ export interface AudioPlayerAdapter {
   playAsync(
     uri: string,
     onStatusUpdate?: (status: PlaybackStatus) => void,
+    options?: { positionMs?: number },
   ): Promise<{ success: boolean; error?: string }>;
+  /** Moves the loaded clip to positionMs (playing or paused). At or past the end the clip finishes cleanly. */
+  seekAsync(positionMs: number): Promise<void>;
   pauseAsync(): Promise<void>;
   stopAsync(): Promise<void>;
   releaseAsync(): Promise<void>;
@@ -188,6 +193,13 @@ class ExpoAvAudioRecorderAdapter implements AudioRecorderAdapter {
     const perm = await this.requestPermissionsAsync();
     if (!perm.granted) return { success: false, error: "Microphone permission was denied." };
 
+    // The microphone must never hear a voice note: stop any playing audio before the mic opens.
+    try {
+      await activePlayerAdapter.stopAsync();
+    } catch {
+      // Nothing was playing.
+    }
+
     const rec = new av.Audio.Recording();
     try {
       await av.Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
@@ -259,7 +271,12 @@ class ExpoAvAudioRecorderAdapter implements AudioRecorderAdapter {
 
   private async resetAudioMode(av: any): Promise<void> {
     try {
-      await av.Audio.setAudioModeAsync({ allowsRecordingIOS: false });
+      // Back to the playback mode used by the player adapter.
+      await av.Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        playsInSilentModeIOS: true,
+        shouldDuckAndroid: true,
+      });
     } catch {
       // Non-fatal.
     }
@@ -282,10 +299,15 @@ class ExpoAvAudioPlayerAdapter implements AudioPlayerAdapter {
   async playAsync(
     uri: string,
     onStatusUpdate?: (status: PlaybackStatus) => void,
+    options?: { positionMs?: number },
   ): Promise<{ success: boolean; error?: string }> {
     const av = loadExpoAv();
     if (!av) return { success: false, error: UNAVAILABLE };
     if (!uri) return { success: false, error: "Audio URI is required." };
+    // Playback can never start while a voice note is being recorded (the mic would capture it).
+    if (isRecordingSession() || activeRecorderAdapter.isRecording()) {
+      return { success: false, error: PLAYBACK_BLOCKED_BY_RECORDING };
+    }
 
     try {
       // Resume the same clip after a pause instead of reloading it.
@@ -295,8 +317,7 @@ class ExpoAvAudioPlayerAdapter implements AudioPlayerAdapter {
         return { success: true };
       }
 
-      this.activeListener?.({ positionMs: 0, durationMs: 0, isPlaying: false, didJustFinish: true });
-      await this.stopAsync();
+      await this.stopAsync(); // tells the previous clip's bubble it is finished
       this.activeListener = onStatusUpdate;
       const gen = ++this.generation;
       await av.Audio.setAudioModeAsync({
@@ -306,7 +327,11 @@ class ExpoAvAudioPlayerAdapter implements AudioPlayerAdapter {
       });
       const { sound } = await av.Audio.Sound.createAsync(
         { uri },
-        { shouldPlay: true, progressUpdateIntervalMillis: 200 },
+        {
+          shouldPlay: true,
+          progressUpdateIntervalMillis: 200,
+          ...(options?.positionMs && options.positionMs > 0 ? { positionMillis: Math.round(options.positionMs) } : {}),
+        },
         (status: any) => {
           if (gen !== this.generation) return;
           if (!status?.isLoaded) {
@@ -342,6 +367,34 @@ class ExpoAvAudioPlayerAdapter implements AudioPlayerAdapter {
     }
   }
 
+  async seekAsync(positionMs: number): Promise<void> {
+    const sound = this.sound;
+    if (!sound) return;
+    const gen = this.generation;
+    try {
+      const status = await sound.getStatusAsync();
+      if (!status?.isLoaded || gen !== this.generation) return;
+      const durationMs = status.durationMillis ?? 0;
+      const target = Math.max(0, Math.round(positionMs));
+      if (durationMs > 0 && target >= durationMs) {
+        // Seeking to the very end finishes the clip: stop, unload and reset the bubble.
+        await this.stopAsync();
+        return;
+      }
+      await sound.setPositionAsync(target);
+      if (gen !== this.generation) return;
+      // A paused clip sends no progress update by itself, so report the new position right away.
+      this.activeListener?.({
+        positionMs: target,
+        durationMs,
+        isPlaying: !!status.isPlaying,
+        didJustFinish: false,
+      });
+    } catch {
+      // Clip was unloaded meanwhile; nothing to seek.
+    }
+  }
+
   async pauseAsync(): Promise<void> {
     this.playing = false;
     try {
@@ -355,8 +408,12 @@ class ExpoAvAudioPlayerAdapter implements AudioPlayerAdapter {
     this.generation++;
     this.playing = false;
     const sound = this.sound;
+    const listener = this.activeListener;
+    this.activeListener = undefined;
     this.sound = null;
     this.currentUri = null;
+    // Whoever showed this clip (a voice bubble, the profile intro) resets to "not playing".
+    listener?.({ positionMs: 0, durationMs: 0, isPlaying: false, didJustFinish: true });
     if (!sound) return;
     try {
       await sound.stopAsync();

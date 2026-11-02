@@ -166,3 +166,15 @@ describe("static guarantees", () => {
     expect(sql).toMatch(/IN \('plus', 'vip'\)/);
   });
 });
+
+describe("Phase C: markChatRead reports whether the server confirmed", () => {
+  it("true on success, false on RPC error, thrown error or invalid id", async () => {
+    mockRpc.mockResolvedValueOnce({ data: 1, error: null });
+    await expect(markChatRead(MATCH, ME)).resolves.toBe(true);
+    mockRpc.mockResolvedValueOnce({ data: null, error: { message: "boom" } });
+    await expect(markChatRead(MATCH, ME)).resolves.toBe(false);
+    mockRpc.mockRejectedValueOnce(new Error("offline"));
+    await expect(markChatRead(MATCH, ME)).resolves.toBe(false);
+    await expect(markChatRead("not-a-uuid", ME)).resolves.toBe(false);
+  });
+});

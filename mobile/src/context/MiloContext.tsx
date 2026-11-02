@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from "react";
+import { getActiveConversation } from "../services/activeConversation";
 import { AppState } from "react-native";
 import type { Profile, MatchItem, Filters, SwipeResponse } from "../types";
 import { DEFAULT_FILTERS } from "../types";
@@ -39,6 +40,8 @@ interface MiloContextType {
   refreshDeck: () => Promise<void>;
   loadMoreDeck: () => Promise<void>;
   refreshMatches: () => Promise<void>;
+  /** The messages of this chat have been read: show 0 unread at once (list and tab), then re-sync with the server. */
+  clearUnread: (matchId: string) => void;
 }
 
 const MiloContext = createContext<MiloContextType>({
@@ -63,6 +66,7 @@ const MiloContext = createContext<MiloContextType>({
   refreshDeck: async () => {},
   loadMoreDeck: async () => {},
   refreshMatches: async () => {},
+  clearUnread: () => {},
 });
 
 export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -206,7 +210,9 @@ export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const requestedUserId = user.id;
         const items = await fetchUserMatches(user.id);
         if (matchesRequest.current === request && activeUserId.current === requestedUserId) {
-          setMatches(items);
+          // The chat on screen is being read: never show it as unread, even if this load raced the mark-read.
+          const open = getActiveConversation();
+          setMatches(open ? items.map((m) => (m.id.toLowerCase() === open && m.unreadCount ? { ...m, unreadCount: 0 } : m)) : items);
         }
       } while (matchesAgain.current);
     };
@@ -298,6 +304,17 @@ export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const triggerBoost = () => false;
   const isBoosting = false;
   const boostTimeRemaining = 0;
+  const clearUnread = useCallback(
+    (matchId: string) => {
+      setMatches((prev) =>
+        prev.some((m) => m.id === matchId && m.unreadCount > 0)
+          ? prev.map((m) => (m.id === matchId ? { ...m, unreadCount: 0 } : m))
+          : prev,
+      );
+      void refreshMatches(); // coalesced; also syncs with a load that started before the mark
+    },
+    [refreshMatches],
+  );
   const totalUnreadCount = matches.reduce((acc, m) => acc + (m.unreadCount || 0), 0);
   const currentProfile = deck[0] || null;
 
@@ -325,6 +342,7 @@ export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children
         refreshDeck,
         loadMoreDeck,
         refreshMatches,
+        clearUnread,
       }}
     >
       {children}

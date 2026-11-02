@@ -1,0 +1,1623 @@
+diff --git a/__tests__/chatVoiceComposer.test.tsx b/__tests__/chatVoiceComposer.test.tsx
+index 4bf2daa..95e8e92 100644
+--- a/__tests__/chatVoiceComposer.test.tsx
++++ b/__tests__/chatVoiceComposer.test.tsx
+@@ -18,7 +18,8 @@ const mockMatches = [
+     unreadCount: 0,
+   },
+ ];
+-const mockMiloValue = { matches: mockMatches, refreshMatches: (...a: unknown[]) => mockRefresh(...a) };
++const mockClearUnread = jest.fn();
++const mockMiloValue = { matches: mockMatches, refreshMatches: (...a: unknown[]) => mockRefresh(...a), clearUnread: (...a: unknown[]) => mockClearUnread(...a) };
+ 
+ const mockFetch = jest.fn();
+ const mockDelete = jest.fn();
+@@ -66,12 +67,13 @@ const mockRecorder = {
+   stopRecordingAsync: jest.fn(),
+   cancelRecordingAsync: jest.fn(async () => undefined),
+ };
++const mockPlayer = { stopAsync: jest.fn(async () => undefined), pauseAsync: jest.fn(async () => undefined), playAsync: jest.fn() };
+ const mockCleanup = jest.fn(async () => undefined);
+ jest.mock("../mobile/src/services/voiceMedia", () => ({
+   VOICE_LIMITS: { maxDurationMs: 60000 },
+   getAudioRecorderAdapter: () => mockRecorder,
+   cleanupAbandonedVoiceFile: (...a: unknown[]) => mockCleanup(...a),
+-  getAudioPlayerAdapter: () => ({ stopAsync: jest.fn(async () => undefined), pauseAsync: jest.fn(async () => undefined), playAsync: jest.fn() }),
++  getAudioPlayerAdapter: () => mockPlayer,
+ }));
+ const mockSendVoice = jest.fn();
+ // Expo inlines EXPO_PUBLIC_* at transform time, so the flag is controlled through the config module.
+@@ -198,3 +200,90 @@ describe("chat composer voice messages", () => {
+     expect(mockRecorder.cancelRecordingAsync).toHaveBeenCalled();
+   });
+ });
++
++describe("Phase B: recording never overlaps playback", () => {
++  // eslint-disable-next-line @typescript-eslint/no-var-requires
++  const { isRecordingSession } = require("../mobile/src/services/voiceSession");
++
++  test("starting a recording stops playing audio first and blocks playback until it ends", async () => {
++    await mount();
++    const order: string[] = [];
++    mockPlayer.stopAsync.mockImplementation(async () => {
++      order.push("stop-playback");
++    });
++    mockRecorder.startRecordingAsync.mockImplementation(async () => {
++      order.push("start-mic");
++      return { success: true };
++    });
++    await press("voice-record");
++    expect(order).toEqual(["stop-playback", "start-mic"]);
++    expect(isRecordingSession()).toBe(true);
++
++    await press("voice-send");
++    expect(isRecordingSession()).toBe(false);
++  });
++
++  test("cancel releases the block", async () => {
++    await mount();
++    await press("voice-record");
++    expect(isRecordingSession()).toBe(true);
++    await press("voice-cancel");
++    expect(isRecordingSession()).toBe(false);
++  });
++
++  test("denied permission and a failed start do not leave playback blocked", async () => {
++    mockRecorder.requestPermissionsAsync.mockResolvedValue({ granted: false, canAskAgain: true });
++    await mount();
++    await press("voice-record");
++    expect(isRecordingSession()).toBe(false);
++
++    mockRecorder.requestPermissionsAsync.mockResolvedValue({ granted: true, canAskAgain: true });
++    mockRecorder.startRecordingAsync.mockResolvedValue({ success: false, error: "busy" });
++    await press("voice-record");
++    expect(isRecordingSession()).toBe(false);
++  });
++
++  test("leaving the chat mid-recording releases the block", async () => {
++    await mount();
++    await press("voice-record");
++    expect(isRecordingSession()).toBe(true);
++    await act(async () => { renderer.unmount(); });
++    await flush();
++    expect(isRecordingSession()).toBe(false);
++  });
++});
++
++describe("Phase C: seen messages clear the unread badge", () => {
++  test("opening the chat marks it read and clears the badge once the server confirmed", async () => {
++    mockMarkRead.mockResolvedValue(true);
++    await mount();
++    expect(mockMarkRead).toHaveBeenCalledWith(MATCH, ME);
++    expect(mockClearUnread).toHaveBeenCalledWith(MATCH);
++  });
++
++  test("a failed mark-read does not clear the badge", async () => {
++    mockMarkRead.mockResolvedValue(false);
++    await mount();
++    expect(mockClearUnread).not.toHaveBeenCalled();
++  });
++
++  test("a message arriving while the chat is open (voice, photo or text) is marked read and cleared", async () => {
++    mockMarkRead.mockResolvedValue(true);
++    await mount();
++    mockMarkRead.mockClear();
++    mockClearUnread.mockClear();
++    await act(async () => {
++      mockOnReceived!({ id: "v1", matchId: MATCH, sender: THEM, from: "them", text: "Voice message", messageType: "voice", at: 9000, status: "sent", deletedAt: null });
++    });
++    await flush();
++    expect(mockMarkRead).toHaveBeenCalledTimes(1);
++    expect(mockClearUnread).toHaveBeenCalledWith(MATCH);
++
++    // My own message is not "unread": nothing to mark.
++    mockMarkRead.mockClear();
++    await act(async () => {
++      mockOnReceived!({ id: "v2", matchId: MATCH, sender: ME, from: "me", text: "hi", messageType: "text", at: 9500, status: "sent", deletedAt: null });
++    });
++    expect(mockMarkRead).not.toHaveBeenCalled();
++  });
++});
+diff --git a/__tests__/readReceiptPrivacy.test.ts b/__tests__/readReceiptPrivacy.test.ts
+index e441bcf..5ac21e8 100644
+--- a/__tests__/readReceiptPrivacy.test.ts
++++ b/__tests__/readReceiptPrivacy.test.ts
+@@ -166,3 +166,15 @@ describe("static guarantees", () => {
+     expect(sql).toMatch(/IN \('plus', 'vip'\)/);
+   });
+ });
++
++describe("Phase C: markChatRead reports whether the server confirmed", () => {
++  it("true on success, false on RPC error, thrown error or invalid id", async () => {
++    mockRpc.mockResolvedValueOnce({ data: 1, error: null });
++    await expect(markChatRead(MATCH, ME)).resolves.toBe(true);
++    mockRpc.mockResolvedValueOnce({ data: null, error: { message: "boom" } });
++    await expect(markChatRead(MATCH, ME)).resolves.toBe(false);
++    mockRpc.mockRejectedValueOnce(new Error("offline"));
++    await expect(markChatRead(MATCH, ME)).resolves.toBe(false);
++    await expect(markChatRead("not-a-uuid", ME)).resolves.toBe(false);
++  });
++});
+diff --git a/__tests__/unreadBadge.test.tsx b/__tests__/unreadBadge.test.tsx
+new file mode 100644
+index 0000000..2d64db9
+--- /dev/null
++++ b/__tests__/unreadBadge.test.tsx
+@@ -0,0 +1,102 @@
++// Phase C: a message I have seen must not keep its "1 new message" badge.
++import React from "react";
++import TestRenderer, { act } from "react-test-renderer";
++
++const MATCH = "33333333-3333-4333-8333-333333333333";
++const OTHER_MATCH = "55555555-5555-4555-8555-555555555555";
++const mockUser = { id: "11111111-1111-4111-8111-111111111111" };
++const mockFetchMatches = jest.fn();
++const mockRpc = jest.fn();
++
++jest.mock("@react-native-async-storage/async-storage", () => ({ getItem: jest.fn(), setItem: jest.fn(), removeItem: jest.fn() }), { virtual: true });
++jest.mock("../mobile/src/context/AuthContext", () => ({ useAuth: () => ({ user: mockUser, isLoggedIn: true }) }));
++jest.mock("../mobile/src/services/discovery", () => ({
++  fetchDiscoveryPage: jest.fn(async () => ({ profiles: [], nextCursor: null })),
++  submitSwipe: jest.fn(),
++  undoLastPass: jest.fn(),
++  DEMO_PROFILES: [],
++}));
++jest.mock("../mobile/src/services/subscription", () => ({
++  getDailyLikeQuota: jest.fn(async () => ({ remaining: 0, limit: 10 })),
++  getUserSubscription: jest.fn(async () => null),
++}));
++jest.mock("../mobile/src/services/chat", () => ({ fetchUserMatches: (...a: unknown[]) => mockFetchMatches(...a) }));
++
++import { MiloProvider, useMilo } from "../mobile/src/context/MiloContext";
++import { clearActiveConversation, setActiveConversation } from "../mobile/src/services/activeConversation";
++
++const item = (id: string, unreadCount: number) => ({ id, otherUser: { id: "x" }, createdAt: "2026-11-01T00:00:00Z", unreadCount });
++
++let ctx: ReturnType<typeof useMilo>;
++const Probe = () => {
++  ctx = useMilo();
++  return null;
++};
++const flush = () => act(async () => { for (let i = 0; i < 6; i++) await Promise.resolve(); });
++
++async function mount() {
++  await act(async () => {
++    TestRenderer.create(
++      <MiloProvider>
++        <Probe />
++      </MiloProvider>,
++    );
++  });
++  await flush();
++}
++
++beforeEach(() => {
++  jest.clearAllMocks();
++  clearActiveConversation(MATCH);
++  mockFetchMatches.mockResolvedValue([item(MATCH, 1), item(OTHER_MATCH, 2)]);
++});
++
++describe("clearUnread", () => {
++  it("sets that chat to 0 at once, keeps the others, and the tab total follows", async () => {
++    await mount();
++    expect(ctx.totalUnreadCount).toBe(3);
++
++    // The server now agrees the chat is read.
++    mockFetchMatches.mockResolvedValue([item(MATCH, 0), item(OTHER_MATCH, 2)]);
++    act(() => ctx.clearUnread(MATCH));
++    expect(ctx.matches.find((m) => m.id === MATCH)!.unreadCount).toBe(0);
++    expect(ctx.matches.find((m) => m.id === OTHER_MATCH)!.unreadCount).toBe(2);
++    expect(ctx.totalUnreadCount).toBe(2);
++    await flush();
++    expect(ctx.totalUnreadCount).toBe(2);
++  });
++
++  it("re-syncs with the server afterwards (one coalesced refresh)", async () => {
++    await mount();
++    mockFetchMatches.mockClear();
++    act(() => {
++      ctx.clearUnread(MATCH);
++      ctx.clearUnread(MATCH);
++    });
++    await flush();
++    expect(mockFetchMatches.mock.calls.length).toBeLessThanOrEqual(2);
++  });
++
++  it("is a no-op for an unknown chat", async () => {
++    await mount();
++    act(() => ctx.clearUnread("66666666-6666-4666-8666-666666666666"));
++    expect(ctx.totalUnreadCount).toBe(3);
++  });
++});
++
++describe("the chat on screen never shows as unread", () => {
++  it("a refresh that raced the mark-read keeps the open chat at 0", async () => {
++    setActiveConversation(MATCH);
++    await mount(); // server still says 1 (mark-read not landed yet)
++    expect(ctx.matches.find((m) => m.id === MATCH)!.unreadCount).toBe(0);
++    expect(ctx.matches.find((m) => m.id === OTHER_MATCH)!.unreadCount).toBe(2);
++  });
++
++  it("after leaving the chat the server count is authoritative again", async () => {
++    setActiveConversation(MATCH);
++    await mount();
++    clearActiveConversation(MATCH);
++    await act(async () => { await ctx.refreshMatches(); });
++    expect(ctx.matches.find((m) => m.id === MATCH)!.unreadCount).toBe(1);
++  });
++});
+diff --git a/__tests__/voiceBubblePlayback.test.tsx b/__tests__/voiceBubblePlayback.test.tsx
+new file mode 100644
+index 0000000..798de9a
+--- /dev/null
++++ b/__tests__/voiceBubblePlayback.test.tsx
+@@ -0,0 +1,226 @@
++// Phase B: ChatBubble voice playback: live notes play on the first tap, errors are shown, recording blocks play, seek works.
++import React from "react";
++import { Alert, PanResponder, Text, TouchableOpacity } from "react-native";
++import TestRenderer, { act } from "react-test-renderer";
++
++const mockPlay = jest.fn();
++const mockPause = jest.fn(async () => undefined);
++const mockStop = jest.fn(async () => undefined);
++const mockSeek = jest.fn(async () => undefined);
++
++jest.mock(
++  "@react-native-async-storage/async-storage",
++  () => ({
++    getItem: jest.fn().mockResolvedValue(null),
++    setItem: jest.fn().mockResolvedValue(undefined),
++    removeItem: jest.fn().mockResolvedValue(undefined),
++  }),
++  { virtual: true },
++);
++jest.mock("expo-image", () => {
++  const { View } = require("react-native");
++  return { Image: View };
++});
++jest.mock("lucide-react-native", () => new Proxy({ __esModule: true }, { get: (t: any, k: string) => (k in t ? t[k] : () => null) }));
++jest.mock("../mobile/src/services/voiceMedia", () => ({
++  getAudioPlayerAdapter: () => ({ playAsync: mockPlay, pauseAsync: mockPause, stopAsync: mockStop, seekAsync: mockSeek }),
++}));
++
++// eslint-disable-next-line @typescript-eslint/no-var-requires
++const { ChatBubble } = require("../mobile/src/components/chat/ChatBubble");
++// eslint-disable-next-line @typescript-eslint/no-var-requires
++const { setRecordingSession } = require("../mobile/src/services/voiceSession");
++
++const PATH = "f6c60000-0000-4000-8000-000000000001/voice_1.m4a";
++const voice = {
++  id: "11111111-1111-4111-8111-111111111111",
++  matchId: "f6c60000-0000-4000-8000-000000000001",
++  sender: "bbbbbbbb-0000-4000-8000-000000000002",
++  from: "them" as const,
++  text: "Voice message",
++  at: Date.now(),
++  status: "sent" as const,
++  messageType: "voice" as const,
++  audioDurationSec: 10,
++  audioPath: PATH,
++};
++
++let panConfig: any;
++const realCreate = PanResponder.create;
++let alertSpy: jest.SpyInstance;
++
++beforeEach(() => {
++  jest.clearAllMocks();
++  setRecordingSession(false);
++  mockPlay.mockResolvedValue({ success: true });
++  panConfig = undefined;
++  jest.spyOn(PanResponder, "create").mockImplementation((cfg: any) => {
++    panConfig = cfg;
++    return realCreate(cfg);
++  });
++  alertSpy = jest.spyOn(Alert, "alert").mockImplementation(() => undefined);
++});
++afterEach(() => {
++  jest.restoreAllMocks();
++});
++
++const render = (props: Record<string, unknown>) => {
++  let r!: TestRenderer.ReactTestRenderer;
++  act(() => {
++    r = TestRenderer.create(<ChatBubble {...(props as any)} />);
++  });
++  return r;
++};
++const texts = (r: TestRenderer.ReactTestRenderer) =>
++  r.root.findAllByType(Text).map((n) => React.Children.toArray(n.props.children).join(""));
++const playBtn = (r: TestRenderer.ReactTestRenderer) => r.root.findByProps({ testID: "voice-play" });
++const tap = async (r: TestRenderer.ReactTestRenderer) => {
++  await act(async () => {
++    await playBtn(r).props.onPress();
++  });
++};
++const layout = (r: TestRenderer.ReactTestRenderer, width = 100) =>
++  act(() => {
++    r.root.findByProps({ testID: "voice-seek" }).props.onLayout({ nativeEvent: { layout: { width } } });
++  });
++const touch = (x: number) => ({ nativeEvent: { locationX: x } });
++
++describe("live voice note plays on the first tap", () => {
++  it("signs the path on tap when the live message has no URL", async () => {
++    const resolve = jest.fn(async () => "https://signed/voice_1");
++    const r = render({ message: voice, resolveAudioUrl: resolve });
++    await tap(r);
++    expect(resolve).toHaveBeenCalledWith(PATH);
++    expect(mockPlay).toHaveBeenCalledWith("https://signed/voice_1", expect.any(Function), undefined);
++    expect(alertSpy).not.toHaveBeenCalled();
++  });
++
++  it("plays directly when the message already has a signed URL (own just-sent note)", async () => {
++    const resolve = jest.fn();
++    const r = render({ message: { ...voice, from: "me", audio: "https://signed/mine" }, resolveAudioUrl: resolve });
++    await tap(r);
++    expect(resolve).not.toHaveBeenCalled();
++    expect(mockPlay).toHaveBeenCalledWith("https://signed/mine", expect.any(Function), undefined);
++  });
++
++  it("shows a clear error instead of doing nothing when no URL can be obtained", async () => {
++    const r = render({ message: voice, resolveAudioUrl: jest.fn(async () => undefined) });
++    await tap(r);
++    expect(mockPlay).not.toHaveBeenCalled();
++    expect(alertSpy).toHaveBeenCalledWith("Voice message", expect.stringMatching(/could not be loaded/i));
++
++    const r2 = render({ message: { ...voice, audioPath: undefined } });
++    await tap(r2);
++    expect(alertSpy).toHaveBeenCalledTimes(2);
++  });
++
++  it("refreshes an expired link once and retries", async () => {
++    mockPlay.mockResolvedValueOnce({ success: false, error: "Could not play this voice message. It may have expired." }).mockResolvedValueOnce({ success: true });
++    const resolve = jest.fn(async () => "https://signed/fresh");
++    const r = render({ message: { ...voice, audio: "https://signed/old" }, resolveAudioUrl: resolve });
++    await tap(r);
++    expect(mockPlay).toHaveBeenNthCalledWith(1, "https://signed/old", expect.any(Function), undefined);
++    expect(mockPlay).toHaveBeenNthCalledWith(2, "https://signed/fresh", expect.any(Function), undefined);
++    expect(alertSpy).not.toHaveBeenCalled();
++  });
++
++  it("reports the error when the retry fails too", async () => {
++    mockPlay.mockResolvedValue({ success: false, error: "Could not play this voice message. It may have expired." });
++    const r = render({ message: { ...voice, audio: "https://signed/old" }, resolveAudioUrl: jest.fn(async () => "https://signed/fresh") });
++    await tap(r);
++    expect(alertSpy).toHaveBeenCalledWith("Voice message", expect.stringMatching(/could not play/i));
++  });
++});
++
++describe("recording blocks playback", () => {
++  it("disables the play button while recording and does not start playback", async () => {
++    const r = render({ message: { ...voice, audio: "https://signed/a" } });
++    expect(playBtn(r).props.disabled).toBe(false);
++    act(() => setRecordingSession(true));
++    expect(playBtn(r).props.disabled).toBe(true);
++    await tap(r); // even if a press slips through
++    expect(mockPlay).not.toHaveBeenCalled();
++    act(() => setRecordingSession(false));
++    expect(playBtn(r).props.disabled).toBe(false);
++  });
++});
++
++describe("seek and clock", () => {
++  it("shows the plain duration while idle and a running clock while playing", async () => {
++    const r = render({ message: { ...voice, audio: "https://signed/a" } });
++    expect(texts(r)).toContain("10s");
++    await tap(r);
++    const cb = mockPlay.mock.calls[0][1];
++    act(() => cb({ positionMs: 3000, durationMs: 10000, isPlaying: true, didJustFinish: false }));
++    expect(texts(r)).toContain("0:03 / 0:10");
++    act(() => cb({ positionMs: 0, durationMs: 0, isPlaying: false, didJustFinish: true }));
++    expect(texts(r)).toContain("10s");
++  });
++
++  it("dragging then releasing seeks the loaded clip to that fraction", async () => {
++    const r = render({ message: { ...voice, audio: "https://signed/a" } });
++    layout(r, 100);
++    await tap(r);
++    const cb = mockPlay.mock.calls[0][1];
++    act(() => cb({ positionMs: 1000, durationMs: 10000, isPlaying: true, didJustFinish: false }));
++
++    act(() => panConfig.onPanResponderGrant(touch(20)));
++    act(() => panConfig.onPanResponderMove(touch(60)));
++    expect(texts(r)).toContain("0:06 / 0:10"); // live preview while dragging
++    await act(async () => panConfig.onPanResponderRelease(touch(60)));
++    expect(mockSeek).toHaveBeenCalledWith(6000);
++  });
++
++  it("a status update during the drag does not move the thumb back", async () => {
++    const r = render({ message: { ...voice, audio: "https://signed/a" } });
++    layout(r, 100);
++    await tap(r);
++    const cb = mockPlay.mock.calls[0][1];
++    act(() => panConfig.onPanResponderGrant(touch(80)));
++    act(() => cb({ positionMs: 1000, durationMs: 10000, isPlaying: true, didJustFinish: false }));
++    expect(texts(r)).toContain("0:08 / 0:10");
++    await act(async () => panConfig.onPanResponderRelease(touch(80)));
++  });
++
++  it("seeking before the first play makes playback start at that point", async () => {
++    const r = render({ message: { ...voice, audio: "https://signed/a" } });
++    layout(r, 100);
++    act(() => panConfig.onPanResponderGrant(touch(30)));
++    await act(async () => panConfig.onPanResponderRelease(touch(30)));
++    expect(mockSeek).not.toHaveBeenCalled();
++    expect(texts(r)).toContain("0:03 / 0:10");
++    await tap(r);
++    expect(mockPlay).toHaveBeenCalledWith("https://signed/a", expect.any(Function), { positionMs: 3000 });
++  });
++
++  it("seeking while paused keeps it paused and seeks the loaded clip", async () => {
++    const r = render({ message: { ...voice, audio: "https://signed/a" } });
++    layout(r, 100);
++    await tap(r);
++    await tap(r); // second tap pauses
++    expect(mockPause).toHaveBeenCalled();
++    act(() => panConfig.onPanResponderGrant(touch(50)));
++    await act(async () => panConfig.onPanResponderRelease(touch(50)));
++    expect(mockSeek).toHaveBeenCalledWith(5000);
++    expect(mockPlay).toHaveBeenCalledTimes(1);
++  });
++
++  it("dragging to the very end hands the end position to the player (it finishes the clip)", async () => {
++    const r = render({ message: { ...voice, audio: "https://signed/a" } });
++    layout(r, 100);
++    await tap(r);
++    act(() => panConfig.onPanResponderGrant(touch(500))); // beyond the track: clamped
++    await act(async () => panConfig.onPanResponderRelease(touch(500)));
++    expect(mockSeek).toHaveBeenCalledWith(10000);
++  });
++
++  it("does not take touches while recording", () => {
++    const r = render({ message: { ...voice, audio: "https://signed/a" } });
++    expect(panConfig.onStartShouldSetPanResponder()).toBe(true);
++    act(() => setRecordingSession(true));
++    expect(panConfig.onStartShouldSetPanResponder()).toBe(false);
++    expect(panConfig.onPanResponderTerminationRequest()).toBe(false);
++    act(() => setRecordingSession(false));
++    r.unmount();
++  });
++});
+diff --git a/__tests__/voiceLiveSigning.test.ts b/__tests__/voiceLiveSigning.test.ts
+new file mode 100644
+index 0000000..0badb40
+--- /dev/null
++++ b/__tests__/voiceLiveSigning.test.ts
+@@ -0,0 +1,117 @@
++// Phase B.1: a voice note that arrives live (Realtime) must carry a signed URL so the first tap plays it.
++const mockGetSignedUrls = jest.fn();
++const mockGetSignedUrl = jest.fn();
++
++jest.mock(
++  "@react-native-async-storage/async-storage",
++  () => ({
++    getItem: jest.fn().mockResolvedValue(null),
++    setItem: jest.fn().mockResolvedValue(undefined),
++    removeItem: jest.fn().mockResolvedValue(undefined),
++  }),
++  { virtual: true },
++);
++
++const handlers: Record<string, (payload: any) => void> = {};
++const mockChannel: any = {
++  on: jest.fn((_type: string, cfg: any, cb: (p: any) => void) => {
++    handlers[`${cfg.event}:${cfg.table}`] = cb;
++    return mockChannel;
++  }),
++  subscribe: jest.fn(() => mockChannel),
++};
++jest.mock("../mobile/src/services/supabase", () => ({
++  isSupabaseConfigured: () => true,
++  supabase: { channel: jest.fn(() => mockChannel), rpc: jest.fn(), from: jest.fn(), storage: { from: jest.fn() } },
++}));
++jest.mock("../mobile/src/services/storage", () => ({
++  getSignedUrls: (...a: unknown[]) => mockGetSignedUrls(...a),
++  getSignedUrl: (...a: unknown[]) => mockGetSignedUrl(...a),
++  prepareVoiceUpload: jest.fn(),
++  sanitizeAndPrepareImageUpload: jest.fn(),
++  imageFileExtension: jest.fn(),
++}));
++jest.mock("../mobile/src/services/notifications", () => ({ pushNotificationToInbox: jest.fn(async () => undefined) }));
++
++import { realtimeMediaPaths, resolveChatMediaUrl, subscribeToMatchMessages } from "../mobile/src/services/chat";
++
++const ME = "aaaaaaaa-0000-4000-8000-000000000001";
++const THEM = "bbbbbbbb-0000-4000-8000-000000000002";
++const MATCH = "f6c60000-0000-4000-8000-000000000001";
++
++const voiceRow = (over: Record<string, unknown> = {}) => ({
++  id: "11111111-1111-4111-8111-111111111111",
++  match_id: MATCH,
++  sender: THEM,
++  body: "Voice message",
++  audio_path: `${MATCH}/voice_1.m4a`,
++  audio_duration_sec: 7,
++  message_type: "voice",
++  created_at: "2026-11-01T10:00:00Z",
++  ...over,
++});
++
++beforeEach(() => {
++  jest.clearAllMocks();
++});
++
++describe("realtimeMediaPaths", () => {
++  it("returns the voice path and the photo path of a live row", () => {
++    expect(realtimeMediaPaths(voiceRow({ image_path: "p/i.jpg" }), ME)).toEqual([`${MATCH}/voice_1.m4a`, "p/i.jpg"]);
++  });
++  it("skips deleted rows and an unopened View Once photo from the partner", () => {
++    expect(realtimeMediaPaths(voiceRow({ deleted_at: "2026-11-01T11:00:00Z" }), ME)).toEqual([]);
++    expect(realtimeMediaPaths({ sender: THEM, image_path: "p/i.jpg", is_view_once: true, viewed_at: null }, ME)).toEqual([]);
++    expect(realtimeMediaPaths({ sender: ME, image_path: "p/i.jpg", is_view_once: true, viewed_at: null }, ME)).toEqual(["p/i.jpg"]);
++  });
++  it("returns nothing for a text row", () => {
++    expect(realtimeMediaPaths({ sender: THEM, body: "hi", message_type: "text" }, ME)).toEqual([]);
++  });
++});
++
++describe("live voice note delivery", () => {
++  it("signs the audio path before handing the message to the screen", async () => {
++    const path = `${MATCH}/voice_1.m4a`;
++    mockGetSignedUrls.mockResolvedValue({ [path]: "https://signed/voice_1" });
++    const received: any[] = [];
++    subscribeToMatchMessages(MATCH, (m) => received.push(m), ME);
++
++    handlers["INSERT:messages"]!({ new: voiceRow() });
++    expect(received).toHaveLength(0); // waits for the signature
++    await new Promise((r) => setImmediate(r));
++
++    expect(mockGetSignedUrls).toHaveBeenCalledWith("chat", [path]);
++    expect(received).toHaveLength(1);
++    expect(received[0]).toMatchObject({ audio: "https://signed/voice_1", audioPath: path, messageType: "voice", from: "them" });
++  });
++
++  it("still delivers the message (with its path) when signing fails, so the bubble can sign on tap", async () => {
++    mockGetSignedUrls.mockRejectedValue(new Error("network"));
++    const received: any[] = [];
++    subscribeToMatchMessages(MATCH, (m) => received.push(m), ME);
++    handlers["INSERT:messages"]!({ new: voiceRow() });
++    await new Promise((r) => setImmediate(r));
++    expect(received).toHaveLength(1);
++    expect(received[0].audio).toBeUndefined();
++    expect(received[0].audioPath).toBe(`${MATCH}/voice_1.m4a`);
++  });
++
++  it("delivers text messages immediately without signing", () => {
++    const received: any[] = [];
++    subscribeToMatchMessages(MATCH, (m) => received.push(m), ME);
++    handlers["INSERT:messages"]!({ new: { id: "22222222-2222-4222-8222-222222222222", match_id: MATCH, sender: THEM, body: "hello", message_type: "text", created_at: "2026-11-01T10:00:00Z" } });
++    expect(received).toHaveLength(1);
++    expect(mockGetSignedUrls).not.toHaveBeenCalled();
++  });
++});
++
++describe("resolveChatMediaUrl", () => {
++  it("signs a chat path and never throws", async () => {
++    mockGetSignedUrl.mockResolvedValueOnce("https://signed/x");
++    await expect(resolveChatMediaUrl("a/b.m4a")).resolves.toBe("https://signed/x");
++    expect(mockGetSignedUrl).toHaveBeenCalledWith("chat", "a/b.m4a");
++    mockGetSignedUrl.mockRejectedValueOnce(new Error("boom"));
++    await expect(resolveChatMediaUrl("a/b.m4a")).resolves.toBeUndefined();
++    await expect(resolveChatMediaUrl("")).resolves.toBeUndefined();
++  });
++});
+diff --git a/__tests__/voicePlayerAdapter.test.ts b/__tests__/voicePlayerAdapter.test.ts
+new file mode 100644
+index 0000000..fdf2142
+--- /dev/null
++++ b/__tests__/voicePlayerAdapter.test.ts
+@@ -0,0 +1,189 @@
++// Phase B.2 + B.3: recording never overlaps playback, and clips can be sought.
++jest.mock("expo-file-system/legacy", () => ({ deleteAsync: jest.fn(async () => undefined), getInfoAsync: jest.fn(async () => ({ exists: true, size: 16384 })) }), { virtual: true });
++jest.mock(
++  "expo-av",
++  () => {
++    const recording = {
++      prepareToRecordAsync: jest.fn(async () => undefined),
++      startAsync: jest.fn(async () => undefined),
++      stopAndUnloadAsync: jest.fn(async () => ({ durationMillis: 4200 })),
++      getURI: jest.fn(() => "file:///cache/rec.m4a"),
++    };
++    let statusCb: ((s: any) => void) | null = null;
++    const sound = {
++      playAsync: jest.fn(async () => undefined),
++      pauseAsync: jest.fn(async () => undefined),
++      stopAsync: jest.fn(async () => undefined),
++      unloadAsync: jest.fn(async () => undefined),
++      setPositionAsync: jest.fn(async () => undefined),
++      getStatusAsync: jest.fn(async () => ({ isLoaded: true, isPlaying: true, durationMillis: 10000, positionMillis: 1000 })),
++    };
++    return {
++      __recording: recording,
++      __sound: sound,
++      __emitStatus: (s: any) => statusCb?.(s),
++      Audio: {
++        requestPermissionsAsync: jest.fn(async () => ({ granted: true, canAskAgain: true })),
++        setAudioModeAsync: jest.fn(async () => undefined),
++        Recording: jest.fn(() => recording),
++        Sound: {
++          createAsync: jest.fn(async (_src: any, _opts: any, cb: (s: any) => void) => {
++            statusCb = cb;
++            return { sound };
++          }),
++        },
++      },
++    };
++  },
++  { virtual: true },
++);
++
++import { getAudioPlayerAdapter, getAudioRecorderAdapter } from "../mobile/src/services/voiceMedia";
++import { formatClock, isRecordingSession, setRecordingSession } from "../mobile/src/services/voiceSession";
++
++// eslint-disable-next-line @typescript-eslint/no-var-requires
++const av = require("expo-av");
++const URL1 = "https://example.com/a.m4a";
++
++beforeEach(async () => {
++  jest.clearAllMocks();
++  setRecordingSession(false);
++  await getAudioPlayerAdapter().stopAsync();
++  await getAudioRecorderAdapter().cancelRecordingAsync();
++  jest.clearAllMocks();
++  av.__sound.getStatusAsync.mockResolvedValue({ isLoaded: true, isPlaying: true, durationMillis: 10000, positionMillis: 1000 });
++});
++
++describe("recording and playback never overlap", () => {
++  it("starting a recording stops a playing clip first and tells its bubble", async () => {
++    const player = getAudioPlayerAdapter();
++    const updates: any[] = [];
++    await player.playAsync(URL1, (s) => updates.push(s));
++    expect(player.isPlaying()).toBe(true);
++
++    const res = await getAudioRecorderAdapter().startRecordingAsync();
++    expect(res.success).toBe(true);
++    expect(player.isPlaying()).toBe(false);
++    expect(av.__sound.unloadAsync).toHaveBeenCalled();
++    expect(updates.at(-1)).toMatchObject({ isPlaying: false, didJustFinish: true });
++    // The sound was unloaded before the microphone mode was switched on.
++    const stopOrder = av.__sound.stopAsync.mock.invocationCallOrder[0];
++    const micCall = av.Audio.setAudioModeAsync.mock.calls.findIndex((c: any[]) => c[0]?.allowsRecordingIOS === true);
++    expect(micCall).toBeGreaterThanOrEqual(0);
++    const modeOrder = av.Audio.setAudioModeAsync.mock.invocationCallOrder[micCall];
++    expect(stopOrder).toBeLessThan(modeOrder);
++    await getAudioRecorderAdapter().cancelRecordingAsync();
++  });
++
++  it("playback is refused while a recording is active and works again afterwards", async () => {
++    const recorder = getAudioRecorderAdapter();
++    const player = getAudioPlayerAdapter();
++    await recorder.startRecordingAsync();
++    expect(recorder.isRecording()).toBe(true);
++
++    const blocked = await player.playAsync(URL1);
++    expect(blocked.success).toBe(false);
++    expect(blocked.error).toMatch(/finish recording/i);
++    expect(av.Audio.Sound.createAsync).not.toHaveBeenCalled();
++
++    await recorder.stopRecordingAsync();
++    const ok = await player.playAsync(URL1);
++    expect(ok.success).toBe(true);
++  });
++
++  it("playback is refused while the screen holds the recording session (mic still starting)", async () => {
++    setRecordingSession(true);
++    expect(isRecordingSession()).toBe(true);
++    const res = await getAudioPlayerAdapter().playAsync(URL1);
++    expect(res.success).toBe(false);
++    expect(av.Audio.Sound.createAsync).not.toHaveBeenCalled();
++    setRecordingSession(false);
++  });
++
++  it("restores the playback audio mode after recording stops or is cancelled", async () => {
++    const recorder = getAudioRecorderAdapter();
++    await recorder.startRecordingAsync();
++    await recorder.stopRecordingAsync();
++    expect(av.Audio.setAudioModeAsync).toHaveBeenLastCalledWith(expect.objectContaining({ allowsRecordingIOS: false, playsInSilentModeIOS: true }));
++
++    av.Audio.setAudioModeAsync.mockClear();
++    await recorder.startRecordingAsync();
++    await recorder.cancelRecordingAsync();
++    expect(av.Audio.setAudioModeAsync).toHaveBeenLastCalledWith(expect.objectContaining({ allowsRecordingIOS: false }));
++  });
++
++  it("a failed start leaves playback allowed", async () => {
++    av.__recording.startAsync.mockRejectedValueOnce(new Error("busy"));
++    const res = await getAudioRecorderAdapter().startRecordingAsync();
++    expect(res.success).toBe(false);
++    expect((await getAudioPlayerAdapter().playAsync(URL1)).success).toBe(true);
++  });
++});
++
++describe("seek", () => {
++  it("moves a playing clip and reports the new position", async () => {
++    const player = getAudioPlayerAdapter();
++    const updates: any[] = [];
++    await player.playAsync(URL1, (s) => updates.push(s));
++    await player.seekAsync(4000);
++    expect(av.__sound.setPositionAsync).toHaveBeenCalledWith(4000);
++    expect(updates.at(-1)).toMatchObject({ positionMs: 4000, durationMs: 10000, isPlaying: true, didJustFinish: false });
++  });
++
++  it("moves a paused clip without resuming it", async () => {
++    const player = getAudioPlayerAdapter();
++    const updates: any[] = [];
++    await player.playAsync(URL1, (s) => updates.push(s));
++    await player.pauseAsync();
++    av.__sound.getStatusAsync.mockResolvedValue({ isLoaded: true, isPlaying: false, durationMillis: 10000, positionMillis: 1000 });
++    av.__sound.playAsync.mockClear();
++    await player.seekAsync(2500);
++    expect(av.__sound.setPositionAsync).toHaveBeenCalledWith(2500);
++    expect(av.__sound.playAsync).not.toHaveBeenCalled();
++    expect(updates.at(-1)).toMatchObject({ positionMs: 2500, isPlaying: false, didJustFinish: false });
++    expect(player.isPlaying()).toBe(false);
++  });
++
++  it("seeking to or past the end finishes the clip cleanly", async () => {
++    const player = getAudioPlayerAdapter();
++    const updates: any[] = [];
++    await player.playAsync(URL1, (s) => updates.push(s));
++    await player.seekAsync(10000);
++    expect(av.__sound.setPositionAsync).not.toHaveBeenCalled();
++    expect(av.__sound.unloadAsync).toHaveBeenCalled();
++    expect(player.isPlaying()).toBe(false);
++    expect(updates.at(-1)).toMatchObject({ isPlaying: false, didJustFinish: true });
++    // A second seek with nothing loaded is a no-op, not an error.
++    await expect(player.seekAsync(500)).resolves.toBeUndefined();
++  });
++
++  it("clamps negative positions to the start and ignores seeks when nothing is loaded", async () => {
++    const player = getAudioPlayerAdapter();
++    await expect(player.seekAsync(1000)).resolves.toBeUndefined();
++    await player.playAsync(URL1);
++    await player.seekAsync(-50);
++    expect(av.__sound.setPositionAsync).toHaveBeenCalledWith(0);
++  });
++
++  it("can start playback at a chosen position (seek before the first play)", async () => {
++    await getAudioPlayerAdapter().playAsync(URL1, undefined, { positionMs: 3000 });
++    expect(av.Audio.Sound.createAsync).toHaveBeenCalledWith({ uri: URL1 }, expect.objectContaining({ shouldPlay: true, positionMillis: 3000 }), expect.any(Function));
++  });
++
++  it("stopping a clip resets the bubble that showed it (profile intro and chat share one player)", async () => {
++    const player = getAudioPlayerAdapter();
++    const updates: any[] = [];
++    await player.playAsync(URL1, (s) => updates.push(s));
++    await player.stopAsync();
++    expect(updates.at(-1)).toMatchObject({ isPlaying: false, didJustFinish: true });
++  });
++});
++
++describe("formatClock", () => {
++  it("formats m:ss and tolerates bad input", () => {
++    expect(formatClock(0)).toBe("0:00");
++    expect(formatClock(65_400)).toBe("1:05");
++    expect(formatClock(-5)).toBe("0:00");
++    expect(formatClock(NaN)).toBe("0:00");
++  });
++});
+diff --git a/mobile/app/(tabs)/chats.tsx b/mobile/app/(tabs)/chats.tsx
+index c74444b..8ca2dd2 100644
+--- a/mobile/app/(tabs)/chats.tsx
++++ b/mobile/app/(tabs)/chats.tsx
+@@ -1,8 +1,8 @@
+-import React, { useMemo } from "react";
++import React, { useCallback, useMemo } from "react";
+ import { formatChatListTime } from "../../src/utils/chatTime";
+ import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from "react-native";
+ import { SafeAreaView } from "react-native-safe-area-context";
+-import { useRouter } from "expo-router";
++import { useFocusEffect, useRouter } from "expo-router";
+ import { MessageCircle, Video } from "lucide-react-native";
+ import { Radii, Typography, ThemeColors, Layout, Spacing } from "../../src/constants/theme";
+ import { useTheme } from "../../src/context/ThemeContext";
+@@ -15,7 +15,13 @@ export default function ChatsScreen() {
+   const { colors: Colors } = useTheme();
+   const styles = useMemo(() => createStyles(Colors), [Colors]);
+   const router = useRouter();
+-  const { matches } = useMilo();
++  const { matches, refreshMatches } = useMilo();
++  // Coming back from a chat: re-read unread counts so a seen message never keeps its badge.
++  useFocusEffect(
++    useCallback(() => {
++      void refreshMatches();
++    }, [refreshMatches]),
++  );
+ 
+   const newMatches = matches.filter((m) => !m.lastMessage);
+   const conversations = matches.filter((m) => !!m.lastMessage);
+diff --git a/mobile/app/chat/[id].tsx b/mobile/app/chat/[id].tsx
+index 297de6e..8868576 100644
+--- a/mobile/app/chat/[id].tsx
++++ b/mobile/app/chat/[id].tsx
+@@ -59,6 +59,7 @@ import {
+   fetchReactionsForMatch,
+   setMessageReaction,
+   subscribeToMatchMessages,
++  resolveChatMediaUrl,
+ } from "../../src/services/chat";
+ import {
+   canDeleteForEveryone as canDeleteMessageForEveryone,
+@@ -89,6 +90,7 @@ import {
+   unblockUser,
+   unmatchUser,
+ } from "../../src/services/moderation";
++import { isRecordingSession, setRecordingSession } from "../../src/services/voiceSession";
+ import { supabase } from "../../src/services/supabase";
+ import { joinChatPresence, type ChatPresence } from "../../src/services/chatPresence";
+ import { presenceLabel } from "../../src/utils/typingState";
+@@ -119,7 +121,7 @@ export default function ChatDetailScreen() {
+   // Off unless EXPO_PUBLIC_FEATURE_VOICE_MESSAGES is exactly "true" (development/test builds only).
+   const voiceEnabled = isServiceConfigured("voiceMessages");
+   const { user } = useAuth();
+-  const { matches, refreshMatches } = useMilo();
++  const { matches, refreshMatches, clearUnread } = useMilo();
+ 
+   const [messages, setMessages] = useState<Message[]>([]);
+   const [inputText, setInputText] = useState("");
+@@ -271,10 +273,17 @@ export default function ChatDetailScreen() {
+     if (!matchId || !user) return;
+     let cancelled = false;
+ 
++    // Seen = read: tell the server, and only when it confirmed, clear the badge on the list and the tab now.
++    const markReadAndClear = () => {
++      void Promise.resolve(markChatRead(matchId, user.id)).then((ok) => {
++        if (ok !== false && !cancelled) clearUnread?.(matchId);
++      });
++    };
++
+     fetchMessagesForMatch(matchId, user.id).then((msgs) => {
+       if (cancelled) return;
+       setMessages(reconcileFetched(msgs, deletionContext()));
+-      markChatRead(matchId, user.id);
++      markReadAndClear();
+     });
+     fetchReactionsForMatch(matchId).then((rows) => {
+       if (!cancelled) setReactions(buildReactionMap(rows));
+@@ -311,7 +320,7 @@ export default function ChatDetailScreen() {
+       (newMsg) => {
+         setMessages((prev) => appendIncoming(prev, newMsg, deletionContext()));
+         if (newMsg.from === "them") {
+-          markChatRead(matchId, user.id);
++          markReadAndClear();
+         }
+       },
+       user.id,
+@@ -338,7 +347,7 @@ export default function ChatDetailScreen() {
+       if (receiptTimer) clearTimeout(receiptTimer);
+       supabase.removeChannel(channel);
+     };
+-  }, [matchId, user]);
++  }, [matchId, user, clearUnread]);
+ 
+   // Online + typing for this chat (Realtime presence/broadcast, nothing stored). Reset when the chat changes.
+   useEffect(() => {
+@@ -568,10 +577,19 @@ export default function ChatDetailScreen() {
+   };
+ 
+   const handleStartRecording = async () => {
+-    if (recordingActiveRef.current || sending) return;
++    if (recordingActiveRef.current || sending || isRecordingSession()) return;
++    // Block playback first (play buttons disable at once), then silence anything already playing:
++    // the microphone must never hear a voice note.
++    setRecordingSession(true);
++    try {
++      await getAudioPlayerAdapter().stopAsync();
++    } catch {
++      // Nothing was playing.
++    }
+     const adapter = getAudioRecorderAdapter();
+     const perm = await adapter.requestPermissionsAsync();
+     if (!perm.granted) {
++      setRecordingSession(false);
+       Alert.alert(
+         "Microphone access needed",
+         perm.canAskAgain
+@@ -583,6 +601,7 @@ export default function ChatDetailScreen() {
+ 
+     const startRes = await adapter.startRecordingAsync(VOICE_LIMITS.maxDurationMs);
+     if (!startRes.success) {
++      setRecordingSession(false);
+       Alert.alert("Voice message", startRes.error || "Could not start recording.");
+       return;
+     }
+@@ -609,6 +628,7 @@ export default function ChatDetailScreen() {
+ 
+     const adapter = getAudioRecorderAdapter();
+     const stopRes = await adapter.stopRecordingAsync();
++    setRecordingSession(false); // the recorder has restored the audio mode: playback is allowed again
+     if (!stopRes.success || !stopRes.result) {
+       if (stopRes.error) Alert.alert("Voice message", stopRes.error);
+       return;
+@@ -655,6 +675,7 @@ export default function ChatDetailScreen() {
+     setIsRecording(false);
+     setRecordingSeconds(0);
+     await getAudioRecorderAdapter().cancelRecordingAsync();
++    setRecordingSession(false);
+   };
+ 
+   // Leaving the chat mid-recording discards it instead of leaving the microphone open.
+@@ -663,7 +684,7 @@ export default function ChatDetailScreen() {
+       if (recordingActiveRef.current) {
+         recordingActiveRef.current = false;
+         if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
+-        void getAudioRecorderAdapter().cancelRecordingAsync();
++        void Promise.resolve(getAudioRecorderAdapter().cancelRecordingAsync()).finally(() => setRecordingSession(false));
+       }
+       void getAudioPlayerAdapter().stopAsync();
+     };
+@@ -866,6 +887,7 @@ export default function ChatDetailScreen() {
+           renderItem={({ item, index }) => (
+             <ChatBubble
+               message={item}
++              resolveAudioUrl={resolveChatMediaUrl}
+               onLongPress={openMessageActions}
+               reactions={summarizeReactions(reactions[item.id], user?.id)}
+               onReactionPress={(m, emoji) =>
+diff --git a/mobile/src/components/chat/ChatBubble.tsx b/mobile/src/components/chat/ChatBubble.tsx
+index fc7a935..7de8906 100644
+--- a/mobile/src/components/chat/ChatBubble.tsx
++++ b/mobile/src/components/chat/ChatBubble.tsx
+@@ -1,11 +1,12 @@
+-import React, { useEffect, useMemo, useState } from "react";
+-import { View, Text, StyleSheet, TouchableOpacity, Pressable, Alert } from "react-native";
++import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
++import { View, Text, StyleSheet, TouchableOpacity, Pressable, Alert, PanResponder } from "react-native";
+ import { Image } from "expo-image";
+ import { Check, CheckCheck, AlertCircle, Play, Pause, Mic, Ban, Camera, Video, VideoOff } from "lucide-react-native";
+ import { Radii, Typography, ThemeColors, Layout, Spacing } from "../../constants/theme";
+ import { useTheme } from "../../context/ThemeContext";
+ import type { Message } from "../../types";
+ import { getAudioPlayerAdapter } from "../../services/voiceMedia";
++import { formatClock, isRecordingSession, useRecordingSession } from "../../services/voiceSession";
+ import { DELETED_BY_ME_PREVIEW_TEXT, DELETED_PREVIEW_TEXT } from "../../utils/messageState";
+ import type { ReactionSummary } from "../../utils/reactions";
+ import { replyAuthorLabel, replySnippet } from "../../utils/replies";
+@@ -28,6 +29,8 @@ interface ChatBubbleProps {
+   onReplyPress?: (replyToId: string) => void;
+   /** Tap on the photo: open it full screen. */
+   onImagePress?: (uri: string) => void;
++  /** Signs a voice note path again (live message without URL, or an expired link). */
++  resolveAudioUrl?: (path: string) => Promise<string | undefined>;
+ }
+ 
+ export const ChatBubble: React.FC<ChatBubbleProps> = ({
+@@ -40,6 +43,7 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({
+   replyUnavailable = false,
+   onReplyPress,
+   onImagePress,
++  resolveAudioUrl,
+ }) => {
+   const { colors: Colors } = useTheme();
+   const styles = useMemo(() => createStyles(Colors), [Colors]);
+@@ -54,17 +58,39 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({
+   const quoteUnavailable = !!quote && (quote.unavailable || replyUnavailable);
+   const [isPlaying, setIsPlaying] = useState(false);
+   const [progress, setProgress] = useState(0);
++  const [positionMs, setPositionMs] = useState(0);
++  const [totalMs, setTotalMs] = useState(0);
++  const [scrubRatio, setScrubRatio] = useState<number | null>(null);
+   const durationSec = message.audioDurationSec || 5;
++  const knownTotalMs = totalMs > 0 ? totalMs : durationSec * 1000;
++  // Playback is blocked while a voice note is being recorded (the mic would pick up the speaker).
++  const recordingBusy = useRecordingSession();
++
++  // Refs used by the pan responder and the status listener (they outlive a single render).
++  const loadedRef = useRef(false); // this bubble's clip is loaded in the player (playing or paused)
++  const startAtRef = useRef(0); // seek made before the first play: playback starts there
++  const busyRef = useRef(false); // a play request is in flight
++  const scrubbingRef = useRef(false);
++  const trackWidthRef = useRef(0);
++  const totalMsRef = useRef(knownTotalMs);
++  totalMsRef.current = knownTotalMs;
++
++  const resetPlayback = useCallback(() => {
++    loadedRef.current = false;
++    startAtRef.current = 0;
++    setIsPlaying(false);
++    setProgress(0);
++    setPositionMs(0);
++  }, []);
+ 
+   // A voice note that gets deleted for everyone while this bubble is playing it must stop at once.
+   useEffect(() => {
+     if (!isDeleted || !isPlaying) return;
+-    setIsPlaying(false);
+-    setProgress(0);
++    resetPlayback();
+     getAudioPlayerAdapter()
+       .stopAsync()
+       .catch(() => {});
+-  }, [isDeleted, isPlaying]);
++  }, [isDeleted, isPlaying, resetPlayback]);
+ 
+   const formatDateHeader = (timestamp: number) => {
+     const today = new Date().toDateString();
+@@ -73,34 +99,118 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({
+     return new Date(timestamp).toLocaleDateString([], { month: "short", day: "numeric" });
+   };
+ 
++  const onPlayerStatus = useCallback(
++    (status: { positionMs: number; durationMs: number; isPlaying: boolean; didJustFinish: boolean }) => {
++      if (status.didJustFinish) {
++        resetPlayback();
++        return;
++      }
++      if (status.durationMs > 0) setTotalMs(status.durationMs);
++      if (scrubbingRef.current) return; // the thumb is being dragged: do not fight it
++      const total = status.durationMs > 0 ? status.durationMs : totalMsRef.current;
++      setPositionMs(status.positionMs);
++      if (total > 0) setProgress(Math.min(1, status.positionMs / total));
++      setIsPlaying(status.isPlaying);
++    },
++    [resetPlayback],
++  );
++
+   const handleTogglePlay = async () => {
+-    if (!message.audio) return;
+     const player = getAudioPlayerAdapter();
+     if (isPlaying) {
+       await player.pauseAsync();
+       setIsPlaying(false);
+       return;
+     }
+-    setIsPlaying(true);
+-    const res = await player.playAsync(message.audio, (status) => {
+-      if (status.durationMs > 0) {
+-        setProgress(status.positionMs / status.durationMs);
++    if (busyRef.current || recordingBusy || isRecordingSession()) return;
++    busyRef.current = true;
++    try {
++      // Live messages may arrive without a signed URL: sign the stored path now instead of doing nothing.
++      let url = message.audio;
++      if (!url && message.audioPath && resolveAudioUrl) url = await resolveAudioUrl(message.audioPath);
++      if (!url) {
++        Alert.alert("Voice message", "This voice message could not be loaded. Check your connection and try again.");
++        return;
+       }
+-      if (status.didJustFinish || (!status.isPlaying && status.positionMs === 0)) {
+-        setIsPlaying(false);
+-        setProgress(0);
++      setIsPlaying(true);
++      const options = startAtRef.current > 0 ? { positionMs: startAtRef.current } : undefined;
++      let res = await player.playAsync(url, onPlayerStatus, options);
++      // The link may have expired: sign the path again and try once more.
++      if (!res.success && message.audioPath && resolveAudioUrl && !isRecordingSession()) {
++        const fresh = await resolveAudioUrl(message.audioPath);
++        if (fresh && fresh !== url) res = await player.playAsync(fresh, onPlayerStatus, options);
+       }
+-    });
+-    if (!res.success) {
+-      setIsPlaying(false);
+-      setProgress(0);
+-      Alert.alert(
+-        "Voice message",
+-        res.error || "Could not play this voice message. Please try again.",
+-      );
++      if (res.success) {
++        loadedRef.current = true;
++        startAtRef.current = 0;
++      } else {
++        resetPlayback();
++        Alert.alert("Voice message", res.error || "Could not play this voice message. Please try again.");
++      }
++    } finally {
++      busyRef.current = false;
+     }
+   };
+ 
++  // Moves playback (or, before the first play, the start point) to a fraction of the clip.
++  const commitSeek = async (ratio: number) => {
++    const r = Math.max(0, Math.min(1, ratio));
++    const target = Math.round(r * totalMsRef.current);
++    if (loadedRef.current) {
++      const player = getAudioPlayerAdapter();
++      if (player.seekAsync) await player.seekAsync(target); // the player reports the new position (or the end)
++      else {
++        setProgress(r);
++        setPositionMs(target);
++      }
++      return;
++    }
++    if (r >= 1) {
++      resetPlayback();
++      return;
++    }
++    startAtRef.current = target;
++    setProgress(r);
++    setPositionMs(target);
++  };
++  const commitSeekRef = useRef(commitSeek);
++  commitSeekRef.current = commitSeek;
++
++  const recordingBusyRef = useRef(recordingBusy);
++  recordingBusyRef.current = recordingBusy;
++
++  const ratioAt = (x: number) => (trackWidthRef.current > 0 ? Math.max(0, Math.min(1, x / trackWidthRef.current)) : 0);
++  const seekPan = useMemo(
++    () =>
++      PanResponder.create({
++        onStartShouldSetPanResponder: () => !recordingBusyRef.current,
++        onMoveShouldSetPanResponder: () => !recordingBusyRef.current,
++        onMoveShouldSetPanResponderCapture: () => !recordingBusyRef.current,
++        // Once the thumb is down the list and any swipe gesture must not take the touch away.
++        onPanResponderTerminationRequest: () => false,
++        onPanResponderGrant: (evt) => {
++          scrubbingRef.current = true;
++          setScrubRatio(ratioAt(evt.nativeEvent.locationX));
++        },
++        onPanResponderMove: (evt) => setScrubRatio(ratioAt(evt.nativeEvent.locationX)),
++        onPanResponderRelease: (evt) => {
++          scrubbingRef.current = false;
++          setScrubRatio(null);
++          void commitSeekRef.current(ratioAt(evt.nativeEvent.locationX));
++        },
++        onPanResponderTerminate: () => {
++          scrubbingRef.current = false;
++          setScrubRatio(null);
++        },
++      }),
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++    [],
++  );
++
++  const shownRatio = scrubRatio ?? progress;
++  const shownMs = scrubRatio !== null ? Math.round(scrubRatio * knownTotalMs) : positionMs;
++  const showClock = scrubRatio !== null || isPlaying || positionMs > 0;
++
+   // Call history ("Missed video call", "Video call · 0:23") is a centered system line, not a bubble.
+   const callEvent = message.messageType === "system" ? parseCallEvent(message.text) : null;
+   if (callEvent) {
+@@ -244,11 +354,15 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({
+                 style={[
+                   styles.voicePlayBtn,
+                   isMe ? styles.voicePlayBtnMe : styles.voicePlayBtnThem,
++                  recordingBusy && { opacity: 0.4 },
+                 ]}
+                 onPress={handleTogglePlay}
++                disabled={recordingBusy}
+                 activeOpacity={0.8}
+                 accessibilityRole="button"
++                accessibilityState={{ disabled: recordingBusy }}
+                 accessibilityLabel={isPlaying ? "Pause voice message" : "Play voice message"}
++                testID="voice-play"
+               >
+                 {isPlaying ? (
+                   <Pause size={18} color={isMe ? Colors.primary : Colors.primaryForeground} />
+@@ -262,10 +376,18 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({
+               </TouchableOpacity>
+ 
+               <View style={styles.voiceDetails}>
+-                <View style={styles.waveContainer}>
++                <View
++                  style={styles.seekTrack}
++                  testID="voice-seek"
++                  onLayout={(e) => {
++                    trackWidthRef.current = e.nativeEvent.layout.width;
++                  }}
++                  {...seekPan.panHandlers}
++                >
++                <View style={styles.waveContainer} pointerEvents="none">
+                   {[30, 60, 45, 90, 70, 40, 85, 55, 100, 65, 45, 80, 50, 75, 35].map(
+                     (h, idx) => {
+-                      const isActive = progress > idx / 15;
++                      const isActive = shownRatio > idx / 15;
+                       return (
+                         <View
+                           key={idx}
+@@ -285,6 +407,7 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({
+                     },
+                   )}
+                 </View>
++                </View>
+ 
+                 <View style={styles.voiceMetaRow}>
+                   <View style={styles.micTag}>
+@@ -295,7 +418,7 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({
+                         isMe ? styles.voiceTextMe : styles.voiceTextThem,
+                       ]}
+                     >
+-                      {durationSec}s
++                      {showClock ? `${formatClock(shownMs)} / ${formatClock(knownTotalMs)}` : `${durationSec}s`}
+                     </Text>
+                   </View>
+                 </View>
+@@ -567,6 +690,10 @@ const createStyles = (Colors: ThemeColors) => StyleSheet.create({
+     flex: 1,
+     justifyContent: "center",
+   },
++  seekTrack: {
++    justifyContent: "center",
++    minHeight: Layout.minTap - 12,
++  },
+   waveContainer: {
+     flexDirection: "row",
+     alignItems: "center",
+diff --git a/mobile/src/context/MiloContext.tsx b/mobile/src/context/MiloContext.tsx
+index 93ee7a5..1d9e160 100644
+--- a/mobile/src/context/MiloContext.tsx
++++ b/mobile/src/context/MiloContext.tsx
+@@ -1,4 +1,5 @@
+ import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from "react";
++import { getActiveConversation } from "../services/activeConversation";
+ import { AppState } from "react-native";
+ import type { Profile, MatchItem, Filters, SwipeResponse } from "../types";
+ import { DEFAULT_FILTERS } from "../types";
+@@ -39,6 +40,8 @@ interface MiloContextType {
+   refreshDeck: () => Promise<void>;
+   loadMoreDeck: () => Promise<void>;
+   refreshMatches: () => Promise<void>;
++  /** The messages of this chat have been read: show 0 unread at once (list and tab), then re-sync with the server. */
++  clearUnread: (matchId: string) => void;
+ }
+ 
+ const MiloContext = createContext<MiloContextType>({
+@@ -63,6 +66,7 @@ const MiloContext = createContext<MiloContextType>({
+   refreshDeck: async () => {},
+   loadMoreDeck: async () => {},
+   refreshMatches: async () => {},
++  clearUnread: () => {},
+ });
+ 
+ export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+@@ -206,7 +210,9 @@ export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children
+         const requestedUserId = user.id;
+         const items = await fetchUserMatches(user.id);
+         if (matchesRequest.current === request && activeUserId.current === requestedUserId) {
+-          setMatches(items);
++          // The chat on screen is being read: never show it as unread, even if this load raced the mark-read.
++          const open = getActiveConversation();
++          setMatches(open ? items.map((m) => (m.id.toLowerCase() === open && m.unreadCount ? { ...m, unreadCount: 0 } : m)) : items);
+         }
+       } while (matchesAgain.current);
+     };
+@@ -298,6 +304,17 @@ export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children
+   const triggerBoost = () => false;
+   const isBoosting = false;
+   const boostTimeRemaining = 0;
++  const clearUnread = useCallback(
++    (matchId: string) => {
++      setMatches((prev) =>
++        prev.some((m) => m.id === matchId && m.unreadCount > 0)
++          ? prev.map((m) => (m.id === matchId ? { ...m, unreadCount: 0 } : m))
++          : prev,
++      );
++      void refreshMatches(); // coalesced; also syncs with a load that started before the mark
++    },
++    [refreshMatches],
++  );
+   const totalUnreadCount = matches.reduce((acc, m) => acc + (m.unreadCount || 0), 0);
+   const currentProfile = deck[0] || null;
+ 
+@@ -325,6 +342,7 @@ export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children
+         refreshDeck,
+         loadMoreDeck,
+         refreshMatches,
++        clearUnread,
+       }}
+     >
+       {children}
+diff --git a/mobile/src/services/chat.ts b/mobile/src/services/chat.ts
+index 934a537..71d987b 100644
+--- a/mobile/src/services/chat.ts
++++ b/mobile/src/services/chat.ts
+@@ -452,7 +452,8 @@ export async function sendVoiceMessage(
+       };
+     }
+ 
+-    const signedUrl = (await getSignedUrl("chat", audioPath)) ?? audioUri;
++    // No fallback to the local file: it is deleted right after sending. Without a URL the bubble signs on tap.
++    const signedUrl = await getSignedUrl("chat", audioPath);
+     const newMsg: Message = {
+       id: messageId,
+       matchId,
+@@ -460,6 +461,7 @@ export async function sendVoiceMessage(
+       from: "me",
+       text: "Voice message",
+       audio: signedUrl,
++      audioPath,
+       audioDurationSec: durationSec,
+       messageType: "voice",
+       at: Date.now(),
+@@ -534,13 +536,35 @@ export async function setMessageReaction(messageId: string, emoji: string | null
+   }
+ }
+ 
+-export async function markChatRead(matchId: string, _currentUserId?: string): Promise<void> {
++/** Marks the other person's messages (text, voice, photo) as read. true only when the server confirmed it. Never throws. */
++export async function markChatRead(matchId: string, _currentUserId?: string): Promise<boolean> {
+   try {
+-    if (!matchId || !isValidUUID(matchId)) return;
++    if (!matchId || !isValidUUID(matchId)) return false;
+     // Server-timed and member-checked; marks only the other person's messages.
+-    await supabase.rpc("mark_chat_read", { _match_id: matchId });
++    const res: any = await supabase.rpc("mark_chat_read", { _match_id: matchId });
++    return !res?.error;
+   } catch {
+-    // Ignore mark read errors
++    return false;
++  }
++}
++
++/** Paths of a live (Realtime) row that need a signed URL. Deleted rows and unopened View Once photos from the partner are skipped. */
++export function realtimeMediaPaths(row: any, currentUserId?: string): string[] {
++  if (!row || row.deleted_at) return [];
++  const paths: string[] = [];
++  if (row.audio_path) paths.push(row.audio_path);
++  const hiddenViewOnce = !!row.is_view_once && row.sender !== currentUserId && !row.viewed_at;
++  if (row.image_path && !hiddenViewOnce) paths.push(row.image_path);
++  return paths;
++}
++
++/** Fresh signed URL for a chat media path (lazy signing and retry of an expired voice note link). */
++export async function resolveChatMediaUrl(path: string): Promise<string | undefined> {
++  if (!path) return undefined;
++  try {
++    return await getSignedUrl("chat", path);
++  } catch {
++    return undefined;
+   }
+ }
+ 
+@@ -582,24 +606,37 @@ export function subscribeToMatchMessages(
+       (payload) => {
+         const msg = payload.new;
+         if (!msg) return;
+-        onMessageReceived(mapMessageRow(msg, currentUserId ?? ""));
+-
+-        // If the incoming message is from the other user, dispatch to in-app notifications
+-        if (currentUserId && msg.sender !== currentUserId && msg.message_type !== "system") {
+-          pushNotificationToInbox(currentUserId, {
+-            kind: "message",
+-            title: "New Message",
+-            text: msg.body
+-              ? msg.body.length > 50
+-                ? `${msg.body.slice(0, 50)}...`
+-                : msg.body
+-              : "Sent a photo",
+-            data: {
+-              matchId,
+-              senderId: msg.sender,
+-            },
+-          }).catch(() => {});
++        const deliver = (signed: Record<string, string | undefined> = {}) => {
++          onMessageReceived(mapMessageRow(msg, currentUserId ?? "", signed));
++
++          // If the incoming message is from the other user, dispatch to in-app notifications
++          if (currentUserId && msg.sender !== currentUserId && msg.message_type !== "system") {
++            pushNotificationToInbox(currentUserId, {
++              kind: "message",
++              title: "New Message",
++              text: msg.body
++                ? msg.body.length > 50
++                  ? `${msg.body.slice(0, 50)}...`
++                  : msg.body
++                : "Sent a photo",
++              data: {
++                matchId,
++                senderId: msg.sender,
++              },
++            }).catch(() => {});
++          }
++        };
++
++        // Realtime rows carry only storage paths. Sign voice/photo paths first so a live voice note plays on the
++        // first tap. Text messages stay synchronous.
++        const paths = realtimeMediaPaths(msg, currentUserId);
++        if (paths.length === 0) {
++          deliver();
++          return;
+         }
++        getSignedUrls("chat", paths)
++          .then((signed) => deliver(signed))
++          .catch(() => deliver()); // The bubble signs lazily on tap if this failed.
+       },
+     )
+     .on(
+diff --git a/mobile/src/services/voiceMedia.ts b/mobile/src/services/voiceMedia.ts
+index 7f38ce1..2cef53c 100644
+--- a/mobile/src/services/voiceMedia.ts
++++ b/mobile/src/services/voiceMedia.ts
+@@ -2,6 +2,8 @@
+ // Manages runtime microphone permissions, voice note duration limits, file size constraints,
+ // audio adapters, and local file cleanup.
+ 
++import { isRecordingSession, PLAYBACK_BLOCKED_BY_RECORDING } from "./voiceSession";
++
+ export const VOICE_LIMITS = {
+   maxDurationMs: 60_000, // 60 seconds maximum voice note duration
+   minDurationMs: 500, // Reject accidental taps under 500ms
+@@ -49,7 +51,10 @@ export interface AudioPlayerAdapter {
+   playAsync(
+     uri: string,
+     onStatusUpdate?: (status: PlaybackStatus) => void,
++    options?: { positionMs?: number },
+   ): Promise<{ success: boolean; error?: string }>;
++  /** Moves the loaded clip to positionMs (playing or paused). At or past the end the clip finishes cleanly. */
++  seekAsync(positionMs: number): Promise<void>;
+   pauseAsync(): Promise<void>;
+   stopAsync(): Promise<void>;
+   releaseAsync(): Promise<void>;
+@@ -188,6 +193,13 @@ class ExpoAvAudioRecorderAdapter implements AudioRecorderAdapter {
+     const perm = await this.requestPermissionsAsync();
+     if (!perm.granted) return { success: false, error: "Microphone permission was denied." };
+ 
++    // The microphone must never hear a voice note: stop any playing audio before the mic opens.
++    try {
++      await activePlayerAdapter.stopAsync();
++    } catch {
++      // Nothing was playing.
++    }
++
+     const rec = new av.Audio.Recording();
+     try {
+       await av.Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
+@@ -259,7 +271,12 @@ class ExpoAvAudioRecorderAdapter implements AudioRecorderAdapter {
+ 
+   private async resetAudioMode(av: any): Promise<void> {
+     try {
+-      await av.Audio.setAudioModeAsync({ allowsRecordingIOS: false });
++      // Back to the playback mode used by the player adapter.
++      await av.Audio.setAudioModeAsync({
++        allowsRecordingIOS: false,
++        playsInSilentModeIOS: true,
++        shouldDuckAndroid: true,
++      });
+     } catch {
+       // Non-fatal.
+     }
+@@ -282,10 +299,15 @@ class ExpoAvAudioPlayerAdapter implements AudioPlayerAdapter {
+   async playAsync(
+     uri: string,
+     onStatusUpdate?: (status: PlaybackStatus) => void,
++    options?: { positionMs?: number },
+   ): Promise<{ success: boolean; error?: string }> {
+     const av = loadExpoAv();
+     if (!av) return { success: false, error: UNAVAILABLE };
+     if (!uri) return { success: false, error: "Audio URI is required." };
++    // Playback can never start while a voice note is being recorded (the mic would capture it).
++    if (isRecordingSession() || activeRecorderAdapter.isRecording()) {
++      return { success: false, error: PLAYBACK_BLOCKED_BY_RECORDING };
++    }
+ 
+     try {
+       // Resume the same clip after a pause instead of reloading it.
+@@ -295,8 +317,7 @@ class ExpoAvAudioPlayerAdapter implements AudioPlayerAdapter {
+         return { success: true };
+       }
+ 
+-      this.activeListener?.({ positionMs: 0, durationMs: 0, isPlaying: false, didJustFinish: true });
+-      await this.stopAsync();
++      await this.stopAsync(); // tells the previous clip's bubble it is finished
+       this.activeListener = onStatusUpdate;
+       const gen = ++this.generation;
+       await av.Audio.setAudioModeAsync({
+@@ -306,7 +327,11 @@ class ExpoAvAudioPlayerAdapter implements AudioPlayerAdapter {
+       });
+       const { sound } = await av.Audio.Sound.createAsync(
+         { uri },
+-        { shouldPlay: true, progressUpdateIntervalMillis: 200 },
++        {
++          shouldPlay: true,
++          progressUpdateIntervalMillis: 200,
++          ...(options?.positionMs && options.positionMs > 0 ? { positionMillis: Math.round(options.positionMs) } : {}),
++        },
+         (status: any) => {
+           if (gen !== this.generation) return;
+           if (!status?.isLoaded) {
+@@ -342,6 +367,34 @@ class ExpoAvAudioPlayerAdapter implements AudioPlayerAdapter {
+     }
+   }
+ 
++  async seekAsync(positionMs: number): Promise<void> {
++    const sound = this.sound;
++    if (!sound) return;
++    const gen = this.generation;
++    try {
++      const status = await sound.getStatusAsync();
++      if (!status?.isLoaded || gen !== this.generation) return;
++      const durationMs = status.durationMillis ?? 0;
++      const target = Math.max(0, Math.round(positionMs));
++      if (durationMs > 0 && target >= durationMs) {
++        // Seeking to the very end finishes the clip: stop, unload and reset the bubble.
++        await this.stopAsync();
++        return;
++      }
++      await sound.setPositionAsync(target);
++      if (gen !== this.generation) return;
++      // A paused clip sends no progress update by itself, so report the new position right away.
++      this.activeListener?.({
++        positionMs: target,
++        durationMs,
++        isPlaying: !!status.isPlaying,
++        didJustFinish: false,
++      });
++    } catch {
++      // Clip was unloaded meanwhile; nothing to seek.
++    }
++  }
++
+   async pauseAsync(): Promise<void> {
+     this.playing = false;
+     try {
+@@ -355,8 +408,12 @@ class ExpoAvAudioPlayerAdapter implements AudioPlayerAdapter {
+     this.generation++;
+     this.playing = false;
+     const sound = this.sound;
++    const listener = this.activeListener;
++    this.activeListener = undefined;
+     this.sound = null;
+     this.currentUri = null;
++    // Whoever showed this clip (a voice bubble, the profile intro) resets to "not playing".
++    listener?.({ positionMs: 0, durationMs: 0, isPlaying: false, didJustFinish: true });
+     if (!sound) return;
+     try {
+       await sound.stopAsync();
+diff --git a/mobile/src/services/voiceSession.ts b/mobile/src/services/voiceSession.ts
+new file mode 100644
+index 0000000..256180d
+--- /dev/null
++++ b/mobile/src/services/voiceSession.ts
+@@ -0,0 +1,37 @@
++// Shared "a voice note is being recorded" flag. The microphone and the speaker must never run together:
++// the mic would pick up the other person's voice note. Pure module (no native code) so every screen,
++// the playback adapter and the tests read the same state.
++import { useSyncExternalStore } from "react";
++
++let recording = false;
++const listeners = new Set<() => void>();
++
++export function isRecordingSession(): boolean {
++  return recording;
++}
++
++export function setRecordingSession(active: boolean): void {
++  if (recording === active) return;
++  recording = active;
++  listeners.forEach((l) => l());
++}
++
++export function subscribeRecordingSession(listener: () => void): () => void {
++  listeners.add(listener);
++  return () => {
++    listeners.delete(listener);
++  };
++}
++
++/** React hook: true while a voice note is being recorded (play buttons are disabled meanwhile). */
++export function useRecordingSession(): boolean {
++  return useSyncExternalStore(subscribeRecordingSession, isRecordingSession, isRecordingSession);
++}
++
++export const PLAYBACK_BLOCKED_BY_RECORDING = "Finish recording before playing a voice message.";
++
++/** Formats milliseconds as m:ss for the voice note clock. */
++export function formatClock(ms: number): string {
++  const total = Math.max(0, Math.round((Number.isFinite(ms) ? ms : 0) / 1000));
++  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
++}
+diff --git a/mobile/src/types/index.ts b/mobile/src/types/index.ts
+index 96e228d..3501871 100644
+--- a/mobile/src/types/index.ts
++++ b/mobile/src/types/index.ts
+@@ -99,6 +99,8 @@ export interface Message {
+   text: string;
+   image?: string;
+   audio?: string;
++  /** Storage path of the voice note; lets the bubble (re)sign the URL when `audio` is missing or expired. */
++  audioPath?: string;
+   audioDurationSec?: number;
+   messageType?: "text" | "image" | "voice" | "system";
+   isViewOnce?: boolean;
+diff --git a/mobile/src/utils/messageState.ts b/mobile/src/utils/messageState.ts
+index 12a76cc..8139cd0 100644
+--- a/mobile/src/utils/messageState.ts
++++ b/mobile/src/utils/messageState.ts
+@@ -85,6 +85,7 @@ export function mapMessageRow(row: any, currentUserId: string, signed: Signed =
+     text: row.body ?? "",
+     image: row.image_path ? (signed[row.image_path] ?? undefined) : undefined,
+     audio: row.audio_path ? (signed[row.audio_path] ?? undefined) : undefined,
++    ...(row.audio_path ? { audioPath: row.audio_path as string } : {}),
+     audioDurationSec: row.audio_duration_sec,
+     messageType: row.message_type || (row.audio_path ? "voice" : row.image_path ? "image" : "text"),
+     isViewOnce: !!row.is_view_once,

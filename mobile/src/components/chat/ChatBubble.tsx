@@ -1,11 +1,12 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { View, Text, StyleSheet, TouchableOpacity, Pressable, Alert } from "react-native";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { View, Text, StyleSheet, TouchableOpacity, Pressable, Alert, PanResponder } from "react-native";
 import { Image } from "expo-image";
 import { Check, CheckCheck, AlertCircle, Play, Pause, Mic, Ban, Camera, Video, VideoOff } from "lucide-react-native";
 import { Radii, Typography, ThemeColors, Layout, Spacing } from "../../constants/theme";
 import { useTheme } from "../../context/ThemeContext";
 import type { Message } from "../../types";
 import { getAudioPlayerAdapter } from "../../services/voiceMedia";
+import { formatClock, isRecordingSession, useRecordingSession } from "../../services/voiceSession";
 import { DELETED_BY_ME_PREVIEW_TEXT, DELETED_PREVIEW_TEXT } from "../../utils/messageState";
 import type { ReactionSummary } from "../../utils/reactions";
 import { replyAuthorLabel, replySnippet } from "../../utils/replies";
@@ -28,6 +29,8 @@ interface ChatBubbleProps {
   onReplyPress?: (replyToId: string) => void;
   /** Tap on the photo: open it full screen. */
   onImagePress?: (uri: string) => void;
+  /** Signs a voice note path again (live message without URL, or an expired link). */
+  resolveAudioUrl?: (path: string) => Promise<string | undefined>;
 }
 
 export const ChatBubble: React.FC<ChatBubbleProps> = ({
@@ -40,6 +43,7 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({
   replyUnavailable = false,
   onReplyPress,
   onImagePress,
+  resolveAudioUrl,
 }) => {
   const { colors: Colors } = useTheme();
   const styles = useMemo(() => createStyles(Colors), [Colors]);
@@ -54,17 +58,39 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({
   const quoteUnavailable = !!quote && (quote.unavailable || replyUnavailable);
   const [isPlaying, setIsPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [positionMs, setPositionMs] = useState(0);
+  const [totalMs, setTotalMs] = useState(0);
+  const [scrubRatio, setScrubRatio] = useState<number | null>(null);
   const durationSec = message.audioDurationSec || 5;
+  const knownTotalMs = totalMs > 0 ? totalMs : durationSec * 1000;
+  // Playback is blocked while a voice note is being recorded (the mic would pick up the speaker).
+  const recordingBusy = useRecordingSession();
+
+  // Refs used by the pan responder and the status listener (they outlive a single render).
+  const loadedRef = useRef(false); // this bubble's clip is loaded in the player (playing or paused)
+  const startAtRef = useRef(0); // seek made before the first play: playback starts there
+  const busyRef = useRef(false); // a play request is in flight
+  const scrubbingRef = useRef(false);
+  const trackWidthRef = useRef(0);
+  const totalMsRef = useRef(knownTotalMs);
+  totalMsRef.current = knownTotalMs;
+
+  const resetPlayback = useCallback(() => {
+    loadedRef.current = false;
+    startAtRef.current = 0;
+    setIsPlaying(false);
+    setProgress(0);
+    setPositionMs(0);
+  }, []);
 
   // A voice note that gets deleted for everyone while this bubble is playing it must stop at once.
   useEffect(() => {
     if (!isDeleted || !isPlaying) return;
-    setIsPlaying(false);
-    setProgress(0);
+    resetPlayback();
     getAudioPlayerAdapter()
       .stopAsync()
       .catch(() => {});
-  }, [isDeleted, isPlaying]);
+  }, [isDeleted, isPlaying, resetPlayback]);
 
   const formatDateHeader = (timestamp: number) => {
     const today = new Date().toDateString();
@@ -73,33 +99,117 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({
     return new Date(timestamp).toLocaleDateString([], { month: "short", day: "numeric" });
   };
 
+  const onPlayerStatus = useCallback(
+    (status: { positionMs: number; durationMs: number; isPlaying: boolean; didJustFinish: boolean }) => {
+      if (status.didJustFinish) {
+        resetPlayback();
+        return;
+      }
+      if (status.durationMs > 0) setTotalMs(status.durationMs);
+      if (scrubbingRef.current) return; // the thumb is being dragged: do not fight it
+      const total = status.durationMs > 0 ? status.durationMs : totalMsRef.current;
+      setPositionMs(status.positionMs);
+      if (total > 0) setProgress(Math.min(1, status.positionMs / total));
+      setIsPlaying(status.isPlaying);
+    },
+    [resetPlayback],
+  );
+
   const handleTogglePlay = async () => {
-    if (!message.audio) return;
     const player = getAudioPlayerAdapter();
     if (isPlaying) {
       await player.pauseAsync();
       setIsPlaying(false);
       return;
     }
-    setIsPlaying(true);
-    const res = await player.playAsync(message.audio, (status) => {
-      if (status.durationMs > 0) {
-        setProgress(status.positionMs / status.durationMs);
+    if (busyRef.current || recordingBusy || isRecordingSession()) return;
+    busyRef.current = true;
+    try {
+      // Live messages may arrive without a signed URL: sign the stored path now instead of doing nothing.
+      let url = message.audio;
+      if (!url && message.audioPath && resolveAudioUrl) url = await resolveAudioUrl(message.audioPath);
+      if (!url) {
+        Alert.alert("Voice message", "This voice message could not be loaded. Check your connection and try again.");
+        return;
       }
-      if (status.didJustFinish || (!status.isPlaying && status.positionMs === 0)) {
-        setIsPlaying(false);
-        setProgress(0);
+      setIsPlaying(true);
+      const options = startAtRef.current > 0 ? { positionMs: startAtRef.current } : undefined;
+      let res = await player.playAsync(url, onPlayerStatus, options);
+      // The link may have expired: sign the path again and try once more.
+      if (!res.success && message.audioPath && resolveAudioUrl && !isRecordingSession()) {
+        const fresh = await resolveAudioUrl(message.audioPath);
+        if (fresh && fresh !== url) res = await player.playAsync(fresh, onPlayerStatus, options);
       }
-    });
-    if (!res.success) {
-      setIsPlaying(false);
-      setProgress(0);
-      Alert.alert(
-        "Voice message",
-        res.error || "Could not play this voice message. Please try again.",
-      );
+      if (res.success) {
+        loadedRef.current = true;
+        startAtRef.current = 0;
+      } else {
+        resetPlayback();
+        Alert.alert("Voice message", res.error || "Could not play this voice message. Please try again.");
+      }
+    } finally {
+      busyRef.current = false;
     }
   };
+
+  // Moves playback (or, before the first play, the start point) to a fraction of the clip.
+  const commitSeek = async (ratio: number) => {
+    const r = Math.max(0, Math.min(1, ratio));
+    const target = Math.round(r * totalMsRef.current);
+    if (loadedRef.current) {
+      const player = getAudioPlayerAdapter();
+      if (player.seekAsync) await player.seekAsync(target); // the player reports the new position (or the end)
+      else {
+        setProgress(r);
+        setPositionMs(target);
+      }
+      return;
+    }
+    if (r >= 1) {
+      resetPlayback();
+      return;
+    }
+    startAtRef.current = target;
+    setProgress(r);
+    setPositionMs(target);
+  };
+  const commitSeekRef = useRef(commitSeek);
+  commitSeekRef.current = commitSeek;
+
+  const recordingBusyRef = useRef(recordingBusy);
+  recordingBusyRef.current = recordingBusy;
+
+  const ratioAt = (x: number) => (trackWidthRef.current > 0 ? Math.max(0, Math.min(1, x / trackWidthRef.current)) : 0);
+  const seekPan = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => !recordingBusyRef.current,
+        onMoveShouldSetPanResponder: () => !recordingBusyRef.current,
+        onMoveShouldSetPanResponderCapture: () => !recordingBusyRef.current,
+        // Once the thumb is down the list and any swipe gesture must not take the touch away.
+        onPanResponderTerminationRequest: () => false,
+        onPanResponderGrant: (evt) => {
+          scrubbingRef.current = true;
+          setScrubRatio(ratioAt(evt.nativeEvent.locationX));
+        },
+        onPanResponderMove: (evt) => setScrubRatio(ratioAt(evt.nativeEvent.locationX)),
+        onPanResponderRelease: (evt) => {
+          scrubbingRef.current = false;
+          setScrubRatio(null);
+          void commitSeekRef.current(ratioAt(evt.nativeEvent.locationX));
+        },
+        onPanResponderTerminate: () => {
+          scrubbingRef.current = false;
+          setScrubRatio(null);
+        },
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
+  const shownRatio = scrubRatio ?? progress;
+  const shownMs = scrubRatio !== null ? Math.round(scrubRatio * knownTotalMs) : positionMs;
+  const showClock = scrubRatio !== null || isPlaying || positionMs > 0;
 
   // Call history ("Missed video call", "Video call · 0:23") is a centered system line, not a bubble.
   const callEvent = message.messageType === "system" ? parseCallEvent(message.text) : null;
@@ -244,11 +354,15 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({
                 style={[
                   styles.voicePlayBtn,
                   isMe ? styles.voicePlayBtnMe : styles.voicePlayBtnThem,
+                  recordingBusy && { opacity: 0.4 },
                 ]}
                 onPress={handleTogglePlay}
+                disabled={recordingBusy}
                 activeOpacity={0.8}
                 accessibilityRole="button"
+                accessibilityState={{ disabled: recordingBusy }}
                 accessibilityLabel={isPlaying ? "Pause voice message" : "Play voice message"}
+                testID="voice-play"
               >
                 {isPlaying ? (
                   <Pause size={18} color={isMe ? Colors.primary : Colors.primaryForeground} />
@@ -262,10 +376,18 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({
               </TouchableOpacity>
 
               <View style={styles.voiceDetails}>
-                <View style={styles.waveContainer}>
+                <View
+                  style={styles.seekTrack}
+                  testID="voice-seek"
+                  onLayout={(e) => {
+                    trackWidthRef.current = e.nativeEvent.layout.width;
+                  }}
+                  {...seekPan.panHandlers}
+                >
+                <View style={styles.waveContainer} pointerEvents="none">
                   {[30, 60, 45, 90, 70, 40, 85, 55, 100, 65, 45, 80, 50, 75, 35].map(
                     (h, idx) => {
-                      const isActive = progress > idx / 15;
+                      const isActive = shownRatio > idx / 15;
                       return (
                         <View
                           key={idx}
@@ -285,6 +407,7 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({
                     },
                   )}
                 </View>
+                </View>
 
                 <View style={styles.voiceMetaRow}>
                   <View style={styles.micTag}>
@@ -295,7 +418,7 @@ export const ChatBubble: React.FC<ChatBubbleProps> = ({
                         isMe ? styles.voiceTextMe : styles.voiceTextThem,
                       ]}
                     >
-                      {durationSec}s
+                      {showClock ? `${formatClock(shownMs)} / ${formatClock(knownTotalMs)}` : `${durationSec}s`}
                     </Text>
                   </View>
                 </View>
@@ -566,6 +689,10 @@ const createStyles = (Colors: ThemeColors) => StyleSheet.create({
   voiceDetails: {
     flex: 1,
     justifyContent: "center",
+  },
+  seekTrack: {
+    justifyContent: "center",
+    minHeight: Layout.minTap - 12,
   },
   waveContainer: {
     flexDirection: "row",

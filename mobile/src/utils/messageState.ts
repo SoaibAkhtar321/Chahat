@@ -85,6 +85,7 @@ export function mapMessageRow(row: any, currentUserId: string, signed: Signed = 
     text: row.body ?? "",
     image: row.image_path ? (signed[row.image_path] ?? undefined) : undefined,
     audio: row.audio_path ? (signed[row.audio_path] ?? undefined) : undefined,
+    ...(row.audio_path ? { audioPath: row.audio_path as string } : {}),
     audioDurationSec: row.audio_duration_sec,
     messageType: row.message_type || (row.audio_path ? "voice" : row.image_path ? "image" : "text"),
     isViewOnce: !!row.is_view_once,

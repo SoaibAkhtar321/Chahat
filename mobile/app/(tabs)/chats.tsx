@@ -1,8 +1,8 @@
-import React, { useMemo } from "react";
+import React, { useCallback, useMemo } from "react";
 import { formatChatListTime } from "../../src/utils/chatTime";
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 import { MessageCircle, Video } from "lucide-react-native";
 import { Radii, Typography, ThemeColors, Layout, Spacing } from "../../src/constants/theme";
 import { useTheme } from "../../src/context/ThemeContext";
@@ -15,7 +15,13 @@ export default function ChatsScreen() {
   const { colors: Colors } = useTheme();
   const styles = useMemo(() => createStyles(Colors), [Colors]);
   const router = useRouter();
-  const { matches } = useMilo();
+  const { matches, refreshMatches } = useMilo();
+  // Coming back from a chat: re-read unread counts so a seen message never keeps its badge.
+  useFocusEffect(
+    useCallback(() => {
+      void refreshMatches();
+    }, [refreshMatches]),
+  );
 
   const newMatches = matches.filter((m) => !m.lastMessage);
   const conversations = matches.filter((m) => !!m.lastMessage);
