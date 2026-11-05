@@ -57,9 +57,9 @@ export const PLANS: Record<PlanTier, PlanConfig> = {
     tagline: "1 week, 1 month or 2 months · prepaid, no auto-renewal",
     popular: true,
     features: [
+      "See who liked you and like them back: an instant match, ready to chat",
       "Unlimited Likes",
       "5 minutes/day video calling",
-      "See who liked you",
       "See the profiles you liked",
       "Rewind profiles you passed",
     ],
@@ -69,14 +69,18 @@ export const PLANS: Record<PlanTier, PlanConfig> = {
     name: "Plus",
     tagline: "1 month · prepaid, no auto-renewal",
     badge: "1 Month",
-    features: ["All Premium features", "Read receipts: see when your messages are read"],
+    features: [
+      "See who liked you and like them back: an instant match, ready to chat",
+      "All Premium features",
+      "Read receipts: see when your messages are read",
+    ],
   },
   vip: {
     id: "vip",
     name: "VIP",
     tagline: "1 month · prepaid, no auto-renewal",
     badge: "1 Month",
-    features: ["All Plus features"],
+    features: ["See who liked you and like them back: an instant match, ready to chat", "All Plus features"],
   },
 };
 

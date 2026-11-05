@@ -10,15 +10,17 @@ const read = (p: string) => fs.readFileSync(path.join(__dirname, "..", p), "utf8
 
 describe("Premium promises", () => {
   it("plan cards list exactly the server-checked benefits", () => {
+    // Liking back someone who liked you creates the match on the server (record_swipe), so it is a real promise.
+    const likeBack = "See who liked you and like them back: an instant match, ready to chat";
     expect(PLANS.premium.features).toEqual([
+      likeBack,
       "Unlimited Likes",
       "5 minutes/day video calling",
-      "See who liked you",
       "See the profiles you liked",
       "Rewind profiles you passed",
     ]);
-    expect(PLANS.plus.features).toEqual(["All Premium features", "Read receipts: see when your messages are read"]);
-    expect(PLANS.vip.features).toEqual(["All Plus features"]);
+    expect(PLANS.plus.features).toEqual([likeBack, "All Premium features", "Read receipts: see when your messages are read"]);
+    expect(PLANS.vip.features).toEqual([likeBack, "All Plus features"]);
   });
 
   it("no screen promises features that do not exist", () => {

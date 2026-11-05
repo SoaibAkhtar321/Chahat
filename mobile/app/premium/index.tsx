@@ -276,7 +276,7 @@ export default function PremiumScreen() {
             Chahat · Online Friendship & Meaningful Connections
           </Text>
           <Text style={[styles.heroSubtitle, { color: colors.mutedForeground }]}>
-            Unlock unlimited likes, 5 minutes of video calling a day, see who liked you, and rewind passes.
+            See who already liked you and like them back for an instant match, plus unlimited likes, 5 minutes of video calling a day, and rewind passes.
           </Text>
 
           {currentSub && currentSub.tier !== "free" && (
