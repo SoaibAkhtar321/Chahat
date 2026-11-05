@@ -36,6 +36,8 @@ interface MiloContextType {
   /** Like or pass one specific profile (opened from a link, chat or Discover), not the top Discover card. */
   swipeProfile: (targetId: string, direction: "like" | "pass") => Promise<SwipeResponse>;
   undoPass: () => Promise<boolean>;
+  /** Puts this profile on top of Discover (e.g. opened from a shared link) until it is liked or passed. */
+  showInDiscover: (profile: Profile) => void;
   triggerBoost: () => boolean;
   setFilters: React.Dispatch<React.SetStateAction<Filters>>;
   refreshDeck: () => Promise<void>;
@@ -71,6 +73,7 @@ const MiloContext = createContext<MiloContextType>({
   swipeCard: async () => ({ success: false, isMatch: false, likesRemaining: 0 }),
   swipeProfile: async () => ({ success: false, isMatch: false, likesRemaining: 0 }),
   undoPass: async () => false,
+  showInDiscover: () => {},
   triggerBoost: () => false,
   setFilters: () => {},
   refreshDeck: async () => {},
@@ -87,6 +90,12 @@ const MiloContext = createContext<MiloContextType>({
 export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { user, isLoggedIn } = useAuth();
   const [deck, setDeck] = useState<Profile[]>([]);
+  // A profile opened from a shared link stays on top of Discover across deck reloads until it is swiped.
+  const pinnedProfile = useRef<Profile | null>(null);
+  const withPinned = (list: Profile[]): Profile[] => {
+    const pin = pinnedProfile.current;
+    return pin ? [pin, ...list.filter((p) => p.id !== pin.id)] : list;
+  };
   const [matches, setMatches] = useState<MatchItem[]>([]);
   const [likesRemaining, setLikesRemaining] = useState<number>(0);
   const [dailyLikeLimit, setDailyLikeLimit] = useState<number | null>(null);
@@ -124,6 +133,7 @@ export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children
     deckRequest.current += 1;
     matchesRequest.current += 1;
     subscriptionRequest.current += 1;
+    pinnedProfile.current = null;
     setDeck([]);
     setMatches([]);
     setLikesRemaining(0);
@@ -206,7 +216,7 @@ export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       const page = await fetchDiscoveryPage(filters);
       if (deckRequest.current === request && activeUserId.current === requestedUserId) {
-        setDeck(page.profiles);
+        setDeck(withPinned(page.profiles));
         setNextCursor(page.nextCursor);
       }
     } finally {
@@ -262,7 +272,7 @@ export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (deckRequest.current !== request || activeUserId.current !== requestedUserId) return;
         if (page.profiles.length > 0) {
           emptyChecks.current = 0;
-          setDeck(page.profiles);
+          setDeck(withPinned(page.profiles));
           setNextCursor(page.nextCursor);
         } else {
           emptyChecks.current += 1;
@@ -385,6 +395,7 @@ export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
 
     const target = deck[0]!;
+    if (pinnedProfile.current?.id === target.id) pinnedProfile.current = null;
     const remainingDeck = deck.slice(1);
     setDeck(remainingDeck);
 
@@ -420,7 +431,10 @@ export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const res = await submitSwipe(targetId, direction, user.id);
     if (!res.isMatch) ownSwipeAt.current.delete(targetId);
     if (activeUserId.current !== requestedUserId) return res;
-    if (res.success) setDeck((prev) => prev.filter((p) => p.id !== targetId));
+    if (res.success) {
+      if (pinnedProfile.current?.id === targetId) pinnedProfile.current = null;
+      setDeck((prev) => prev.filter((p) => p.id !== targetId));
+    }
     if (res.likesRemaining !== undefined && res.success) setLikesRemaining(res.likesRemaining);
     if (res.isMatch) {
       if (matchedFromDeck) setLastMatchedProfile(matchedFromDeck);
@@ -443,6 +457,11 @@ export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
     return false;
   };
+
+  const showInDiscover = useCallback((profile: Profile) => {
+    pinnedProfile.current = profile;
+    setDeck((prev) => [profile, ...prev.filter((p) => p.id !== profile.id)]);
+  }, []);
 
   const triggerBoost = () => false;
   const isBoosting = false;
@@ -480,6 +499,7 @@ export const MiloProvider: React.FC<{ children: React.ReactNode }> = ({ children
         swipeCard,
         swipeProfile,
         undoPass,
+        showInDiscover,
         triggerBoost,
         setFilters,
         refreshDeck,

@@ -39,10 +39,36 @@ export async function getProfileActions(profileId: string): Promise<ProfileActio
   if (!isSupabaseConfigured()) return UNKNOWN;
   try {
     const { data, error } = await supabase.rpc("get_profile_actions", { _id: profileId });
-    if (error) return UNKNOWN;
-    return parseProfileActions(data);
+    if (!error) return parseProfileActions(data);
+    console.warn("get_profile_actions failed, using fallback:", error.message);
+  } catch (err) {
+    console.warn("get_profile_actions threw, using fallback:", err);
+  }
+  return fallbackProfileActions(profileId);
+}
+
+/**
+ * Used only when the server check is unavailable, so the profile never ends up with no button at all:
+ * an existing match (members can read their own matches) shows Message; otherwise Like / Pass are offered and
+ * record_swipe on the server still enforces every rule (preferences, blocks, daily limit, no double like).
+ */
+export async function fallbackProfileActions(profileId: string): Promise<ProfileActions> {
+  let uid: string | undefined;
+  try {
+    const { data: sess } = await supabase.auth.getSession();
+    uid = sess?.session?.user?.id;
   } catch {
-    return UNKNOWN;
+    uid = undefined;
+  }
+  if (!uid) return UNKNOWN; // not signed in: nothing to offer
+  if (uid === profileId) return { ...UNKNOWN, available: true, self: true };
+  try {
+    const [a, b] = uid < profileId ? [uid, profileId] : [profileId, uid];
+    const { data: m } = await supabase.from("matches").select("id").eq("user_a", a).eq("user_b", b).maybeSingle();
+    if (m?.id) return { ...UNKNOWN, available: true, matchId: String(m.id), reason: "matched" };
+    return { ...UNKNOWN, available: true, canLike: true };
+  } catch {
+    return { ...UNKNOWN, available: true, canLike: true };
   }
 }
 

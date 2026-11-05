@@ -18,7 +18,7 @@ export default function SharedProfileLink() {
     if (loading) return;
     const valid = isValidProfileId(id);
     if (valid && isLoggedIn && isOnboarded && legalStatus === "accepted") {
-      router.replace({ pathname: "/profile/[id]", params: { id: id.toLowerCase() } });
+      router.replace({ pathname: "/profile/[id]", params: { id: id.toLowerCase(), from: "share" } });
       return;
     }
     setPendingSharedProfile(valid ? id : null);

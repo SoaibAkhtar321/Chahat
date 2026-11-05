@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
 import { VERIFICATION_ENABLED } from "../../src/constants/features";
 import { safeBack } from "../../src/utils/navigation";
 import { getDistanceTo } from "../../src/services/location";
@@ -49,9 +49,10 @@ export default function ProfileDetailScreen() {
   const { colors: Colors } = useTheme();
   const styles = useMemo(() => createStyles(Colors), [Colors]);
   const router = useRouter();
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { id, from } = useLocalSearchParams<{ id: string; from?: string }>();
   const { profile: myProfile } = useAuth();
-  const { deck, swipeProfile } = useMilo();
+  const { deck, swipeProfile, showInDiscover } = useMilo();
+  const sentToDiscover = useRef(false);
   const [actions, setActions] = useState<ProfileActions | null>(null);
   const [acting, setActing] = useState(false);
 
@@ -140,6 +141,16 @@ export default function ProfileDetailScreen() {
 
   const targetProfile: Profile | null = deckMatch || fetchedProfile;
 
+  // Opened from a shared link: not matched and free to like → show it in Discover, on top of the deck, with the
+  // normal Like / Pass. Matched → stay here with Message; already liked / preferences don't fit → stay with the note.
+  useEffect(() => {
+    if (from !== "share" || sentToDiscover.current || !actions || !targetProfile) return;
+    if (!actions.available || actions.self || actions.matchId || !actions.canLike) return;
+    sentToDiscover.current = true;
+    showInDiscover(targetProfile);
+    router.replace("/(tabs)/discover");
+  }, [from, actions, targetProfile, showInDiscover, router]);
+
   if (loading) {
     return (
       <SafeAreaView style={[styles.container, styles.center]}>
@@ -178,7 +189,17 @@ export default function ProfileDetailScreen() {
       if (res.error === "daily_like_limit_reached") {
         Alert.alert("Daily likes used", "You've used today's likes. They reset at midnight, or get Premium for unlimited likes.");
       } else {
-        Alert.alert("Couldn't do that", "This profile can't be liked right now. Please try again later.");
+        const raw = String(res.error || "");
+        Alert.alert(
+          "Couldn't do that",
+          /not available/i.test(raw)
+            ? "This profile isn't available to like: it may be paused, blocked, or outside your match preferences."
+            : /not active/i.test(raw)
+              ? "Your account isn't active right now, so you can't like profiles."
+              : raw
+                ? `This profile couldn't be liked: ${raw}`
+                : "This profile can't be liked right now. Please check your connection and try again.",
+        );
       }
       return;
     }

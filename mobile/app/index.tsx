@@ -41,7 +41,7 @@ export default function Index() {
       router.replace("/(tabs)/discover");
       // A shared profile link opened before sign-in / onboarding opens now, on top of the main app.
       const sharedProfileId = takePendingSharedProfile();
-      if (sharedProfileId) router.push({ pathname: "/profile/[id]", params: { id: sharedProfileId } });
+      if (sharedProfileId) router.push({ pathname: "/profile/[id]", params: { id: sharedProfileId, from: "share" } });
     }
   }, [loading, isLoggedIn, isOnboarded, profile, legalStatus, router]);
 

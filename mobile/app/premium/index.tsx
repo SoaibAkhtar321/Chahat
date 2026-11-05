@@ -229,6 +229,26 @@ export default function PremiumScreen() {
     }
   };
 
+  // The member's live paid plan (expired or cancelled plans don't count).
+  const TIER_RANK: Record<PlanTier, number> = { free: 0, premium: 1, plus: 2, vip: 3 };
+  const livePlan =
+    currentSub &&
+    currentSub.tier !== "free" &&
+    currentSub.status === "active" &&
+    (!currentSub.expiresAt || new Date(currentSub.expiresAt).getTime() > Date.now())
+      ? currentSub
+      : null;
+  const untilText = livePlan?.expiresAt
+    ? ` until ${new Date(livePlan.expiresAt).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}`
+    : "";
+  /** Why the selected plan can't be bought right now (null = it can). */
+  const blockedReason = (tier: PlanTier): string | null => {
+    if (!livePlan || tier === "free") return null;
+    if (tier === livePlan.tier) return `Your current plan · active${untilText}`;
+    if (TIER_RANK[tier] < TIER_RANK[livePlan.tier]) return `Included in your ${PLANS[livePlan.tier].name} plan`;
+    return null;
+  };
+
   const buttonTitle = processing
     ? "Connecting..."
     : selectedTier === "free"
@@ -426,7 +446,15 @@ export default function PremiumScreen() {
                     })}
                   </View>
                 )}
-                {isSelected && (tierKey !== "free" || !isCurrent) ? (
+                {isSelected && blockedReason(tierKey) ? (
+                  <View
+                    style={{ marginBottom: Spacing.sm, paddingVertical: 12, borderRadius: Radii.lg, alignItems: "center", backgroundColor: colors.secondary }}
+                    accessibilityRole="text"
+                    testID="plan-blocked-reason"
+                  >
+                    <Text style={{ color: colors.primary, fontWeight: Typography.weights.bold }}>{blockedReason(tierKey)}</Text>
+                  </View>
+                ) : isSelected && (tierKey !== "free" || !isCurrent) && !(tierKey === "free" && livePlan) ? (
                   <View style={{ marginBottom: Spacing.sm }}>
                     <Button
                       title={buttonTitle}
