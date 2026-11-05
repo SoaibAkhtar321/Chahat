@@ -18,6 +18,10 @@ on:
         default: preview
         type: choice
         options: [preview, production]
+      version_code:
+        description: "Android version code (leave empty = automatic). Set it higher than the last one in Play Console if Play says the code is already used."
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -60,6 +64,26 @@ jobs:
           echo "$GSJ" | base64 -d > google-services.json
           node -e "JSON.parse(require('fs').readFileSync('google-services.json','utf8')); console.log('google-services.json OK')"
 
+      - name: Use a fixed version code (only when one was entered)
+        if: ${{ inputs.version_code != '' }}
+        working-directory: mobile
+        env:
+          VC: ${{ inputs.version_code }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const vc = Number(process.env.VC);
+            if (!Number.isInteger(vc) || vc < 1) { console.error("version_code must be a whole number"); process.exit(1); }
+            const eas = JSON.parse(fs.readFileSync("eas.json", "utf8"));
+            eas.cli.appVersionSource = "local";
+            for (const p of Object.values(eas.build)) delete p.autoIncrement;
+            fs.writeFileSync("eas.json", JSON.stringify(eas, null, 2));
+            const app = JSON.parse(fs.readFileSync("app.json", "utf8"));
+            app.expo.android.versionCode = vc;
+            fs.writeFileSync("app.json", JSON.stringify(app, null, 2));
+            console.log("Building with Android versionCode", vc);
+          '
+
       - name: Build with EAS (local mode on this machine)
         working-directory: mobile
         env:
@@ -83,3 +107,4 @@ jobs:
             mobile/chahat-${{ inputs.profile }}.aab
           if-no-files-found: error
           retention-days: 14
+          
