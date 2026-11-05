@@ -152,6 +152,20 @@ function removeScreenShareFromManifest(manifest) {
   return manifest;
 }
 
+// Removing manifest entries is not enough: react-native-agora pulls in io.agora.rtc:full-screen-sharing, whose
+// manifest declares the mediaProjection foreground service. Excluding the module from the app means none of it
+// (classes, service, permission) reaches the AAB. Agora's own fix for apps that do not use screen sharing.
+const AGORA_SCREEN_SHARE_EXCLUDE_MARKER = "// chahat: exclude Agora screen-sharing module";
+const withoutAgoraScreenShareModule = (config) => {
+  const { withAppBuildGradle } = require("@expo/config-plugins");
+  return withAppBuildGradle(config, (config) => {
+    if (config.modResults.contents.includes(AGORA_SCREEN_SHARE_EXCLUDE_MARKER)) return config;
+    config.modResults.contents +=
+      `\n${AGORA_SCREEN_SHARE_EXCLUDE_MARKER}\nconfigurations.configureEach {\n    exclude group: "io.agora.rtc", module: "full-screen-sharing"\n}\n`;
+    return config;
+  });
+};
+
 const withoutScreenShare = (config) => {
   const { withAndroidManifest } = require("@expo/config-plugins");
   return withAndroidManifest(config, (config) => {
@@ -178,10 +192,11 @@ module.exports = (context) => {
     };
   }
 
-  return withoutScreenShare(withPictureInPicture(withSlimAgoraNativeLibs(withGooglePlayIapFlavor(config))));
+  return withoutAgoraScreenShareModule(withoutScreenShare(withPictureInPicture(withSlimAgoraNativeLibs(withGooglePlayIapFlavor(config)))));
 };
 
 module.exports.resolveGoogleServicesFile = resolveGoogleServicesFile;
 module.exports.UNUSED_AGORA_NATIVE_LIBS = UNUSED_AGORA_NATIVE_LIBS;
 module.exports.applyPictureInPictureToActivity = applyPictureInPictureToActivity;
 module.exports.removeScreenShareFromManifest = removeScreenShareFromManifest;
+module.exports.withoutAgoraScreenShareModule = withoutAgoraScreenShareModule;

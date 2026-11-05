@@ -28,3 +28,17 @@ describe("upload errors show the real reason", () => {
     expect(describeUploadError(err).message).toMatch(re);
   });
 });
+
+describe("Play Store: Agora screen-sharing module excluded", () => {
+  it("adds the gradle exclude for io.agora.rtc:full-screen-sharing once", () => {
+    jest.resetModules();
+    jest.doMock("@expo/config-plugins", () => ({ withAppBuildGradle: (c: any, fn: any) => fn(c) }), { virtual: true });
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const cfg = require("../mobile/app.config.js");
+    const c: any = { modResults: { contents: "android {}" } };
+    cfg.withoutAgoraScreenShareModule(c);
+    cfg.withoutAgoraScreenShareModule(c);
+    expect(c.modResults.contents).toContain('exclude group: "io.agora.rtc", module: "full-screen-sharing"');
+    expect(c.modResults.contents.split("full-screen-sharing").length).toBe(2);
+  });
+});
