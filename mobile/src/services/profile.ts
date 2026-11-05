@@ -1,6 +1,7 @@
 import { supabase } from "./supabase";
 import { getSignedUrls, imageFileExtension, sanitizeAndPrepareImageUpload } from "./storage";
 import { compressToUnderLimit } from "../utils/compressImage";
+import { describeUploadError } from "../utils/uploadError";
 import type { MeProfile, PhotoItem } from "../types";
 import { validateProfileDraft } from "./profilePolicy";
 export { calculateAge, validateDob } from "../utils/validation";
@@ -59,6 +60,10 @@ export async function fetchMyProfile(userId: string, _email: string): Promise<Me
         thumbPath: p.thumbPath,
         isMain: idx === 0,
         status: p.status === "approved" || p.status === "rejected" ? p.status : "pending",
+        rejectionReason:
+          p.status === "rejected" && typeof p.rejectionReason === "string" && p.rejectionReason.trim()
+            ? p.rejectionReason.trim()
+            : undefined,
       }))
     : [];
 
@@ -251,7 +256,7 @@ export async function uploadProfilePhoto(
     upsert: false,
   });
 
-  if (error) throw error;
+  if (error) throw describeUploadError(error);
 
   return {
     path: filePath,

@@ -293,6 +293,18 @@ export const PLAY_PRODUCT_IDS = {
   },
 } as const;
 
+/**
+ * Catalogue prices (docs/PLAN_CATALOG.md), shown only until Google Play returns its localized price.
+ * Google Play's checkout always shows and charges the price configured in Play Console; keep these in sync.
+ */
+export const REFERENCE_PRICES_INR: Record<string, number> = {
+  chahat_premium_1w: 149,
+  chahat_premium_1m: 499,
+  chahat_premium_2m: 700,
+  chahat_plus_1m: 199,
+  chahat_vip_1m: 399,
+};
+
 export interface PlayBillingProduct {
   productId: string;
   localizedPrice: string | null;
@@ -512,7 +524,8 @@ export async function purchaseSubscription(
       return {
         success: false,
         status: "failed",
-        error: "This product is not available in Google Play. No purchase was started.",
+        error:
+          "Google Play did not return this plan, so no payment was started. Install the app from the Play Store (testing track) and check that the product is active in Play Console.",
       };
     }
 

@@ -23,7 +23,7 @@ jest.mock("../mobile/src/components/ui/Chip", () => ({ Chip: () => null }));
 const mockManipulate = jest.fn();
 jest.mock("expo-image-manipulator", () => ({
   manipulateAsync: (...a: unknown[]) => mockManipulate(...a),
-  SaveFormat: { JPEG: "jpeg" },
+  SaveFormat: { JPEG: "jpeg", WEBP: "webp" },
 }), { virtual: true });
 jest.mock("expo-image", () => ({ Image: () => null }));
 jest.mock("react-native-safe-area-context", () => {

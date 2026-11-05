@@ -8,7 +8,7 @@ jest.mock("../mobile/src/context/ThemeContext", () => ({ useTheme: () => ({ colo
 const mockManip = jest.fn();
 jest.mock("expo-image-manipulator", () => ({
   manipulateAsync: (...a: any[]) => mockManip(...a),
-  SaveFormat: { JPEG: "jpeg" },
+  SaveFormat: { JPEG: "jpeg", WEBP: "webp" },
 }));
 const mockRead = jest.fn();
 jest.mock("expo-file-system/legacy", () => ({
@@ -41,12 +41,12 @@ describe("chat photo compression", () => {
     expect(await compressChatImage("file://a.gif")).toBe("file://a.gif");
     expect(mockManip).not.toHaveBeenCalled();
   });
-  it("a large camera photo is resized to at most 1600 px and re-encoded under the size target", async () => {
+  it("a large camera photo is resized to at most CHAT_PHOTO_MAX_WIDTH and re-encoded under the size target", async () => {
     mockRead.mockResolvedValue("/9j/4AAQ");
     mockManip.mockImplementation(async (_uri: string, actions: any[]) =>
       actions.length ? { uri: "file://out.jpg", width: actions[0].resize.width } : { uri: "file://probe.jpg", width: 4000 },
     );
-    fakeSizes([2_000_000, 450_000]);
+    fakeSizes([2_000_000, 250_000]);
     expect(await compressChatImage("file://big.jpg")).toBe("file://out.jpg");
     const resized = mockManip.mock.calls.filter((c) => c[1].length);
     expect(resized[0][1][0].resize.width).toBe(CHAT_PHOTO_MAX_WIDTH);

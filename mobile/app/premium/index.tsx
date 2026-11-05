@@ -12,6 +12,7 @@ import {
   PLANS,
   PREMIUM_BILLING_DURATIONS,
   PLAY_PRODUCT_IDS,
+  REFERENCE_PRICES_INR,
   BILLING_ENABLED,
   getUserSubscription,
   listenForPurchaseUpdates,
@@ -35,6 +36,7 @@ export default function PremiumScreen() {
   const [billingProducts, setBillingProducts] = useState<PlayBillingProduct[]>([]);
   const [subscriptionLoading, setSubscriptionLoading] = useState(true);
   const [subscriptionError, setSubscriptionError] = useState("");
+  const [catalogNotice, setCatalogNotice] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -61,11 +63,22 @@ export default function PremiumScreen() {
     if (BILLING_ENABLED) {
       void loadPlayBillingCatalog()
         .then((products) => {
-          if (active) setBillingProducts(products);
+          if (!active) return;
+          setBillingProducts(products);
+          if (products.length === 0) {
+            setCatalogNotice(
+              "Google Play did not return these plans. Install the app from the Play Store (testing track) and make sure the products are active in Play Console.",
+            );
+          } else {
+            setCatalogNotice("");
+          }
         })
         .catch((error) => {
           console.warn("Google Play product catalog unavailable:", error);
-          if (active) setSubscriptionError("Plans are unavailable right now.");
+          if (active)
+            setCatalogNotice(
+              `Google Play prices could not be loaded: ${error instanceof Error ? error.message : String(error)}`,
+            );
         });
       void listenForPurchaseUpdates((event) => {
         if (!active) return;
@@ -112,12 +125,14 @@ export default function PremiumScreen() {
     };
   }, []);
 
-  // Returns the store price when we have it, otherwise null (nothing is shown).
-  const productPrice = (productId: string | null): string | null =>
-    productId
-      ? (billingProducts.find((product) => product.productId === productId)?.localizedPrice ??
-        null)
-      : null;
+  // Google Play's localized price when loaded; otherwise the catalogue price (Play shows the final price at checkout).
+  const productPrice = (productId: string | null): string | null => {
+    if (!productId) return null;
+    const live = billingProducts.find((product) => product.productId === productId)?.localizedPrice;
+    if (live) return live;
+    const ref = REFERENCE_PRICES_INR[productId];
+    return ref ? `₹${ref}` : null;
+  };
 
   const tierProductId =
     selectedTier === "premium"
@@ -219,7 +234,9 @@ export default function PremiumScreen() {
     : selectedTier === "free"
       ? `Free Plan Active (${dailyLikeLimit ?? "—"} Likes/Day)`
       : BILLING_ENABLED
-        ? "Continue to payment"
+        ? ctaPrice
+          ? `Pay ${ctaPrice}${selectedTier === "premium" ? ` · ${activeDurationObj.label}` : ""}`
+          : "Continue to payment"
         : "Coming soon";
 
   return (
@@ -361,6 +378,68 @@ export default function PremiumScreen() {
                   ))}
                 </View>
 
+                {/* Duration + pay, right inside the selected plan */}
+                {isSelected && tierKey === "premium" && (
+                  <View style={styles.durationGrid}>
+                    {PREMIUM_BILLING_DURATIONS.map((dur) => {
+                      const durSelected = selectedDuration === dur.id;
+                      const price = productPrice(PLAY_PRODUCT_IDS.premium[dur.id]);
+                      return (
+                        <TouchableOpacity
+                          key={dur.id}
+                          style={[
+                            styles.durationCard,
+                            {
+                              backgroundColor: colors.background,
+                              borderColor: durSelected ? colors.primary : colors.border,
+                            },
+                          ]}
+                          onPress={() => setSelectedDuration(dur.id)}
+                          activeOpacity={0.8}
+                        >
+                          {dur.popular && (
+                            <View style={[styles.durationBadge, { backgroundColor: colors.accent }]}>
+                              <Text style={styles.durationBadgeText}>POPULAR</Text>
+                            </View>
+                          )}
+                          <Text
+                            style={[
+                              styles.durationLabel,
+                              { color: durSelected ? colors.primary : colors.foreground },
+                              durSelected && { fontWeight: Typography.weights.bold },
+                            ]}
+                          >
+                            {dur.label}
+                          </Text>
+                          {price ? (
+                            <Text
+                              style={[
+                                styles.durationPrice,
+                                { color: durSelected ? colors.primary : colors.foreground },
+                              ]}
+                            >
+                              {price}
+                            </Text>
+                          ) : null}
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                )}
+                {isSelected && (tierKey !== "free" || !isCurrent) ? (
+                  <View style={{ marginBottom: Spacing.sm }}>
+                    <Button
+                      title={buttonTitle}
+                      loading={processing}
+                      disabled={
+                        selectedTier !== "free" &&
+                        (!BILLING_ENABLED || subscriptionLoading || !!subscriptionError)
+                      }
+                      onPress={handleSelectOrPurchase}
+                    />
+                  </View>
+                ) : null}
+
                 {/* Bottom select button */}
                 <View
                   style={[
@@ -400,86 +479,15 @@ export default function PremiumScreen() {
           })}
         </View>
 
-        {/* Duration (Premium only) */}
-        {selectedTier === "premium" && (
-          <>
-            <Text style={[styles.sectionHeading, { color: colors.mutedForeground }]}>
-              CHOOSE DURATION
-            </Text>
-            <View style={styles.durationGrid}>
-              {PREMIUM_BILLING_DURATIONS.map((dur) => {
-                const isSelected = selectedDuration === dur.id;
-                const price = productPrice(PLAY_PRODUCT_IDS.premium[dur.id]);
-                return (
-                  <TouchableOpacity
-                    key={dur.id}
-                    style={[
-                      styles.durationCard,
-                      {
-                        backgroundColor: colors.card,
-                        borderColor: isSelected ? colors.primary : colors.border,
-                      },
-                    ]}
-                    onPress={() => setSelectedDuration(dur.id)}
-                    activeOpacity={0.8}
-                  >
-                    {dur.popular && (
-                      <View style={[styles.durationBadge, { backgroundColor: colors.accent }]}>
-                        <Text style={styles.durationBadgeText}>POPULAR</Text>
-                      </View>
-                    )}
-                    <Text
-                      style={[
-                        styles.durationLabel,
-                        { color: isSelected ? colors.primary : colors.foreground },
-                        isSelected && { fontWeight: Typography.weights.bold },
-                      ]}
-                    >
-                      {dur.label}
-                    </Text>
-                    {price ? (
-                      <Text
-                        style={[
-                          styles.durationPrice,
-                          { color: isSelected ? colors.primary : colors.foreground },
-                        ]}
-                      >
-                        {price}
-                      </Text>
-                    ) : null}
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-          </>
-        )}
-
         {/* Action Button Card */}
         <View
           style={[styles.ctaCard, { backgroundColor: colors.card, borderColor: colors.border }]}
         >
-          <View style={styles.ctaSummaryRow}>
-            <Text style={[styles.ctaPlanSummary, { color: colors.foreground }]}>
-              {PLANS[selectedTier].name}
-              {selectedTier === "premium" ? ` · ${activeDurationObj.label}` : ""}
+          {catalogNotice ? (
+            <Text style={[styles.heroSubtitle, { color: colors.mutedForeground, marginBottom: Spacing.sm }]}>
+              {catalogNotice}
             </Text>
-            {selectedTier === "free" || ctaPrice ? (
-              <Text style={[styles.ctaTotalAmount, { color: colors.primary }]}>
-                {selectedTier === "free" ? "₹0" : ctaPrice}
-              </Text>
-            ) : null}
-          </View>
-
-          <Button
-            title={buttonTitle}
-            loading={processing}
-            disabled={
-              selectedTier !== "free" &&
-              (!BILLING_ENABLED || subscriptionLoading || !!subscriptionError)
-            }
-            onPress={handleSelectOrPurchase}
-          />
-
+          ) : null}
           <TouchableOpacity
             style={styles.restoreBtn}
             onPress={handleRestore}

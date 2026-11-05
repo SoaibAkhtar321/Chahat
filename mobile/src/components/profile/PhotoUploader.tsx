@@ -34,7 +34,7 @@ export const PhotoUploader: React.FC<PhotoUploaderProps> = ({
   // later change to the list can never put the photo in the wrong place.
   const [pending, setPending] = useState<{ photo: PickedPhoto; index: number; originalUri: string } | null>(null);
 
-  // Compresses the picked image to under 1 MB, then adds it to the list.
+  // Compresses the picked image (WebP, max 1080px, under ~350 KB), then adds it to the list.
   const addPhoto = async (
     asset: { uri: string; width?: number },
     index: number,
@@ -178,17 +178,30 @@ export const PhotoUploader: React.FC<PhotoUploaderProps> = ({
                 </View>
               )}
 
-              {/* Status indicator */}
-              <View
+              {/* Status indicator (tap a rejected photo to see why) */}
+              <TouchableOpacity
+                disabled={item.status !== "rejected"}
+                onPress={() =>
+                  Alert.alert(
+                    "Photo not approved",
+                    `${item.rejectionReason || "This photo did not meet our photo guidelines (clear face, no nudity, no other people's photos, no text or contact details)."}\n\nPlease remove it and upload a different photo.`,
+                  )
+                }
+                accessibilityRole={item.status === "rejected" ? "button" : undefined}
+                accessibilityLabel={item.status === "rejected" ? "Why was this photo rejected" : undefined}
                 style={[
                   styles.statusBadge,
-                  item.status === "approved" ? styles.statusApproved : styles.statusPending,
+                  item.status === "approved"
+                    ? styles.statusApproved
+                    : item.status === "rejected"
+                      ? styles.statusRejected
+                      : styles.statusPending,
                 ]}
               >
                 <Text style={styles.statusText}>
-                  {item.status === "approved" ? "Live" : "Review"}
+                  {item.status === "approved" ? "Live" : item.status === "rejected" ? "Rejected ⓘ" : "Review"}
                 </Text>
-              </View>
+              </TouchableOpacity>
 
               {/* Delete button */}
               <TouchableOpacity
@@ -300,6 +313,9 @@ const createStyles = (Colors: ThemeColors) => StyleSheet.create({
   },
   statusPending: {
     backgroundColor: Colors.accent,
+  },
+  statusRejected: {
+    backgroundColor: Colors.destructive,
   },
   statusText: {
     fontSize: Typography.sizes.xs,

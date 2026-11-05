@@ -120,6 +120,46 @@ const withSlimAgoraNativeLibs = (config) => {
   });
 };
 
+// Agora's screen-capture module merges a mediaProjection foreground service and the
+// FOREGROUND_SERVICE_MEDIA_PROJECTION permission into the app. Chahat never shares or records the screen, and
+// Google Play requires a declaration + video for that service type, so strip them from the merged manifest.
+const AGORA_SCREEN_SHARE_COMPONENTS = {
+  service: ["io.agora.rtc2.extensions.MediaProjectionMgr$LocalScreenCaptureAssistantService"],
+  activity: ["io.agora.rtc2.extensions.MediaProjectionMgr$LocalScreenCaptureAssistantActivity"],
+};
+const REMOVED_PERMISSIONS = ["android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"];
+
+function removeScreenShareFromManifest(manifest) {
+  manifest.$ = manifest.$ || {};
+  manifest.$["xmlns:tools"] = "http://schemas.android.com/tools";
+  const perms = (manifest["uses-permission"] = manifest["uses-permission"] || []);
+  for (const name of REMOVED_PERMISSIONS) {
+    const existing = perms.find((item) => item.$["android:name"] === name);
+    if (existing) existing.$["tools:node"] = "remove";
+    else perms.push({ $: { "android:name": name, "tools:node": "remove" } });
+  }
+  const application = manifest.application?.[0];
+  if (application) {
+    for (const [tag, names] of Object.entries(AGORA_SCREEN_SHARE_COMPONENTS)) {
+      const list = (application[tag] = application[tag] || []);
+      for (const name of names) {
+        if (!list.some((item) => item.$["android:name"] === name)) {
+          list.push({ $: { "android:name": name, "tools:node": "remove" } });
+        }
+      }
+    }
+  }
+  return manifest;
+}
+
+const withoutScreenShare = (config) => {
+  const { withAndroidManifest } = require("@expo/config-plugins");
+  return withAndroidManifest(config, (config) => {
+    removeScreenShareFromManifest(config.modResults.manifest);
+    return config;
+  });
+};
+
 module.exports = (context) => {
   let config = context.config;
 
@@ -138,9 +178,10 @@ module.exports = (context) => {
     };
   }
 
-  return withPictureInPicture(withSlimAgoraNativeLibs(withGooglePlayIapFlavor(config)));
+  return withoutScreenShare(withPictureInPicture(withSlimAgoraNativeLibs(withGooglePlayIapFlavor(config))));
 };
 
 module.exports.resolveGoogleServicesFile = resolveGoogleServicesFile;
 module.exports.UNUSED_AGORA_NATIVE_LIBS = UNUSED_AGORA_NATIVE_LIBS;
 module.exports.applyPictureInPictureToActivity = applyPictureInPictureToActivity;
+module.exports.removeScreenShareFromManifest = removeScreenShareFromManifest;

@@ -10,6 +10,7 @@ import {
 } from "./storage";
 import { DEMO_PROFILES } from "./discovery";
 import { compressChatImage } from "../utils/compressImage";
+import { describeUploadError } from "../utils/uploadError";
 import { pushNotificationToInbox } from "./notifications";
 import { generateUUID, isValidUUID } from "../utils/validation";
 import { mapMessageRow } from "../utils/messageState";
@@ -267,19 +268,28 @@ export async function sendChatMessage(
       // Chat accepts animated GIFs (keyboard / gallery); profile photos never do.
       // Photos are shrunk to phone-screen size first (a camera original is often 4–8 MB); GIFs stay untouched.
       let uploadUri = imageUri;
+      let compressError: Error | null = null;
       try {
         uploadUri = await compressChatImage(imageUri);
-      } catch {
-        // Could not re-encode (unusual format): send the original; the size and type checks below still apply.
+      } catch (e) {
+        // Could not re-encode (unusual format): try the original; the size and type checks below still apply.
+        compressError = e instanceof Error ? e : null;
         uploadUri = imageUri;
       }
-      const { blob, mimeType } = await sanitizeAndPrepareImageUpload(uploadUri, { allowGif: true });
+      let prepared: Awaited<ReturnType<typeof sanitizeAndPrepareImageUpload>>;
+      try {
+        prepared = await sanitizeAndPrepareImageUpload(uploadUri, { allowGif: true });
+      } catch (e) {
+        // Show the compression failure when it is the real cause; otherwise the size/type reason.
+        return { success: false, error: (compressError ?? (e as Error))?.message || "This photo could not be sent." };
+      }
+      const { blob, mimeType } = prepared;
       imagePath = `${matchId}/${messageId}.${imageFileExtension(mimeType)}`;
 
       const { error: uploadErr } = await supabase.storage.from("chat").upload(imagePath, blob, {
         contentType: mimeType,
       });
-      if (uploadErr) return { success: false, error: uploadErr.message };
+      if (uploadErr) return { success: false, error: describeUploadError(uploadErr).message };
     }
 
     const { error } = await supabase.from("messages").insert({

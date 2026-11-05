@@ -11,6 +11,8 @@ export interface PhotoItem {
   thumbPath?: string;
   isMain?: boolean;
   status: "pending" | "approved" | "rejected";
+  /** Moderator's reason when status is "rejected". */
+  rejectionReason?: string;
 }
 
 export interface Profile {
