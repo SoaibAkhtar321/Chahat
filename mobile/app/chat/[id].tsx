@@ -194,6 +194,11 @@ export default function ChatDetailScreen() {
   // Messages that arrived while the reader was scrolled up: drives the "new message" jump button.
   const [unseenIncoming, setUnseenIncoming] = useState(0);
 
+  const settleFrameRef = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (settleFrameRef.current != null) cancelAnimationFrame(settleFrameRef.current);
+  }, []);
+
   const scrollToBottom = (animated = false) => {
     const m = scrollMetricsRef.current;
     // Record where this lands, so a size change that arrives before the scroll event still counts as "at the bottom".
@@ -201,7 +206,13 @@ export default function ChatDetailScreen() {
     flatListRef.current?.scrollToEnd({ animated });
     if (!animated) {
       // Rows (photos, quotes) and the keyboard padding can settle one frame later: land on the true end.
-      requestAnimationFrame(() => flatListRef.current?.scrollToEnd({ animated: false }));
+      // Only one follow-up is ever pending, and it is dropped if the reader scrolled away before it ran
+      // (a late frame must never yank someone who is reading older messages).
+      if (settleFrameRef.current != null) cancelAnimationFrame(settleFrameRef.current);
+      settleFrameRef.current = requestAnimationFrame(() => {
+        settleFrameRef.current = null;
+        if (isNearBottom(scrollMetricsRef.current)) flatListRef.current?.scrollToEnd({ animated: false });
+      });
     }
   };
 
@@ -211,6 +222,11 @@ export default function ChatDetailScreen() {
     m.offsetY = contentOffset.y;
     m.viewportHeight = layoutMeasurement.height;
     m.contentHeight = contentSize.height;
+    // Scrolled away from the bottom: drop any pending "settle at the end" frame.
+    if (settleFrameRef.current != null && !isNearBottom(m)) {
+      cancelAnimationFrame(settleFrameRef.current);
+      settleFrameRef.current = null;
+    }
     // Back at the bottom: whatever arrived meanwhile has now been seen.
     if (isNearBottom(m)) setUnseenIncoming((count) => (count === 0 ? count : 0));
   };
